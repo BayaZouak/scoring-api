@@ -1,3 +1,4 @@
 -r requirements.txt   # ça inclut toutes les dépendances de prod
 pytest
 httpx
+requests
