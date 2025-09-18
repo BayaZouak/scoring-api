@@ -1,0 +1,22 @@
+# Dossiers à ignorer
+__pycache__/
+.pytest_cache/
+tests/
+.github/
+.vscode/
+.ipynb_checkpoints/
+
+# Fichiers à ignorer
+*.pyc
+*.pyo
+*.pyd
+*.db
+*.sqlite3
+*.log
+
+# Notebooks non nécessaires pour l'image
+Zouak_Baya_2_notebook_modelisation_082025.ipynb
+
+# Cache et fichiers temporaires
+*.DS_Store
+.env
