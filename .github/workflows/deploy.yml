@@ -31,3 +31,10 @@ jobs:
         with:
           push: true
           tags: ghcr.io/bayazouak/scoring-api:latest
+
+      - name: Redeploy Render service
+        run: |
+          curl -X POST "https://api.render.com/v1/services/${{ secrets.srv-d36h657fte5s73bfhbrg }}/deploys" \
+          -H "Authorization: Bearer ${{ secrets.rnd_eDOInijPRTTzUqz6um5Cet7SbgkS }}" \
+          -H "Accept: application/json" \
+          -H "Content-Type: application/json"
