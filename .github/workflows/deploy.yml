@@ -34,7 +34,7 @@ jobs:
 
       - name: Redeploy Render service
         run: |
-          curl -X POST "https://api.render.com/v1/services/${{ secrets.srv-d36h657fte5s73bfhbrg }}/deploys" \
-          -H "Authorization: Bearer ${{ secrets.rnd_eDOInijPRTTzUqz6um5Cet7SbgkS }}" \
+          curl -X POST "https://api.render.com/v1/services/${{ secrets.RENDER_SERVICE_ID }}/deploys" \
+          -H "Authorization: Bearer ${{ secrets.RENDER_API_KEY }}" \
           -H "Accept: application/json" \
           -H "Content-Type: application/json"
