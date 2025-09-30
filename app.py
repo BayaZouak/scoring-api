@@ -10,6 +10,7 @@ import shap
 import matplotlib.pyplot as plt
 from sklearn.pipeline import Pipeline
 from typing import Optional
+from scipy.sparse import issparse
 
 # --- Configuration Globale ---
 API_URL = "https://scoring-api-latest.onrender.com/predict"
@@ -20,7 +21,6 @@ st.set_page_config(layout="wide", page_title="Dashboard Scoring Crédit")
 
 @st.cache_data
 def load_data():
-    """Charge l'échantillon client et les statistiques de la population."""
     try:
         df_data = pd.read_csv('client_sample_dashboard.csv') 
         client_ids = df_data['SK_ID_CURR'].unique().tolist()
@@ -36,7 +36,6 @@ def load_data():
 
 @st.cache_resource
 def load_model_and_explainer():
-    """Charge le modèle et initialise l'explainer SHAP (pour l'explication locale et globale)."""
     try:
         model_pipeline = joblib.load('modele_de_scoring.pkl')
         df_ref = pd.read_csv('client_sample_dashboard.csv').drop(columns=['SK_ID_CURR', 'TARGET'], errors='ignore')
@@ -48,17 +47,17 @@ def load_model_and_explainer():
         
         # OBTENIR LES NOMS DE COLONNES POST-PRÉTRAITEMENT 
         try:
-
             feature_names_processed = preprocessor_pipeline.get_feature_names_out().tolist()
-        except AttributeError:
-            # Si get_feature_names_out n'est pas dispo, on utilise des noms génériques
+        except (AttributeError, TypeError):
+            # Si get_feature_names_out échoue, on doit utiliser des noms génériques
             feature_names_processed = [f"Feature_{i}" for i in range(X_ref_processed.shape[1])]
             
         explainer = shap.TreeExplainer(final_classifier, X_ref_processed)
         
-        # On renvoie aussi les noms des colonnes brutes du DF initial (pour SHAP local)
-        feature_names_raw = df_ref.columns.tolist()
+        # feature_names_raw n'est plus utile dans la signature, mais on le garde pour compatibilité
+        feature_names_raw = df_ref.columns.tolist() 
 
+        # On retourne X_ref_processed (pour SHAP global) et feature_names_processed (pour les deux)
         return model_pipeline, explainer, preprocessor_pipeline, X_ref_processed, feature_names_processed, feature_names_raw
         
     except Exception as e:
@@ -68,7 +67,6 @@ def load_model_and_explainer():
 # --- Fonction de Jauge Plotly ---
 
 def create_gauge_chart(probability, threshold):
-    """Crée un graphique de jauge Plotly semi-circulaire (Meter Gauge)."""
     
     confidence_score = (1 - probability) * 100
     confidence_threshold = (1 - threshold) * 100 
@@ -86,14 +84,11 @@ def create_gauge_chart(probability, threshold):
             'bgcolor': "white",
             'borderwidth': 2,
             'bordercolor': "gray",
-            # Le rouge va de 0 à 48% (Seuil de confiance)
             'steps': [
                 {'range': [0, confidence_threshold], 'color': "red"},    
                 {'range': [confidence_threshold, 100], 'color': "green"} 
             ],
-            # Le 'bar' est le curseur noir
             'bar': {'color': 'black', 'thickness': 0.15}, 
-            # Le 'threshold' marque la limite 
             'threshold': {
                 'line': {'color': "black", 'width': 4},
                 'thickness': 0.75,
@@ -107,7 +102,6 @@ def create_gauge_chart(probability, threshold):
 
 # --- Fonction d'Appel de l'API ---
 def get_prediction_from_api(client_features):
-    """Appelle l'API Render pour obtenir le score."""
     payload = {k: None if (pd.isna(v) or v == "") else v for k, v in client_features.items()}
     
     try:
@@ -141,7 +135,7 @@ st.markdown(
 )
 
 
-# --- Barre Latérale  ---
+# --- Barre Latérale  ---
 
 # Affichage du logo dans la barre latérale
 st.sidebar.markdown("---")
@@ -177,7 +171,7 @@ if st.sidebar.button("Calculer le Score (API)", key="calculate_score_quick"):
         st.toast(f"Score pour le client {client_id} calculé!", icon='🚀')
         st.rerun()
 
-# --- Formulaire de Modification  ---
+# --- Formulaire de Modification  ---
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 📝 Modification des Données")
 
@@ -187,7 +181,6 @@ with st.sidebar.form(key=f"form_{client_id}"):
     for feature, value in client_data_raw.items():
         if feature not in ['SK_ID_CURR', 'TARGET']:
             
-            # Utilisation de colonnes simplifiée
             col_label, col_input = st.columns([1.5, 2])
             with col_input:
                 input_val = st.text_input(
@@ -284,26 +277,32 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
             )
         
         with col_slider:
-            max_features_display = min(20, len(feature_names_processed))
-            num_features_to_display = st.slider(
-                "Nombre de variables à afficher :",
-                min_value=5,
-                max_value=max_features_display,
-                value=min(10, max_features_display),
-                step=1,
-                key='num_feat'
-            )
+            if feature_names_processed is not None:
+                max_features_display = min(20, len(feature_names_processed))
+                num_features_to_display = st.slider(
+                    "Nombre de variables à afficher :",
+                    min_value=5,
+                    max_value=max_features_display,
+                    value=min(10, max_features_display),
+                    step=1,
+                    key='num_feat'
+                )
+            else:
+                 st.warning("Variables SHAP non disponibles.")
+                 num_features_to_display = 10 
         
-        if explainer and preprocessor_pipeline and X_ref_processed is not None:
+        if explainer and preprocessor_pipeline and X_ref_processed is not None and feature_names_processed is not None:
             try:
+                # --- EXPLICATION LOCALE ---
                 if explanation_type == 'Locale (Client)':
                     st.markdown("#### Explication Locale : Facteurs influençant le score du client sélectionné")
                     
                     data_to_explain = st.session_state['current_client_data']
                     df_client = pd.DataFrame([data_to_explain]).drop(columns=['SK_ID_CURR', 'TARGET'], errors='ignore')
+                    
+                    # Transformation des données pour le SHAP local
                     X_client_processed = preprocessor_pipeline.transform(df_client) 
                     
-                    # Logique SHAP (Correction)
                     shap_values = explainer.shap_values(X_client_processed)
                     
                     if isinstance(shap_values, list):
@@ -317,26 +316,29 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
                         client_shap_values = shap_values[0] 
                         base_value = explainer.expected_value if not isinstance(explainer.expected_value, (np.ndarray, list)) else explainer.expected_value[0]
                     
+                    # Convertit en array si c'est une matrice creuse pour SHAP.Explanation
+                    if issparse(X_client_processed):
+                        client_data = X_client_processed.toarray()[0]
+                    else:
+                        client_data = X_client_processed[0]
+                        
+                    # Création de l'objet Explanation ALIGNÉ (shap_values, data et feature_names sont de la même longueur)
                     e = shap.Explanation(
                         client_shap_values, 
                         base_value, 
-                        data=df_client.iloc[0].values, 
-                        feature_names=df_client.columns.tolist() 
+                        data=client_data, 
+                        feature_names=feature_names_processed 
                     )
                     
                     plt.rcParams.update({'figure.max_open_warning': 0})
-                    # Augmentation de la taille de la figure pour "dézoomer" 
                     fig, ax = plt.subplots(figsize=(15, 9)) 
-                    # shap.plots.waterfall(e, max_display=num_features_to_display, show=False)
-                    
-                    # Affichage explicite des noms pour le waterfall SHAP
-                    # On utilise l'objet Explanation avec les noms de colonnes du DF non transformé
                     shap.plots.waterfall(e, max_display=num_features_to_display, show=False)
                     
                     st.pyplot(fig, use_container_width=True)
                     
-                    st.caption(f"Le rouge pousse vers le défaut, le bleu diminue le risque. Affiche les {num_features_to_display} facteurs les plus importants pour ce client.")
+                    st.caption(f"Le rouge pousse vers le défaut, le bleu diminue le risque. Affiche les **{num_features_to_display} facteurs les plus importants** (noms des variables après pré-traitement).")
 
+                # --- EXPLICATION GLOBALE ---
                 elif explanation_type == 'Globale (Modèle)':
                     st.markdown("#### Explication Globale : Importance moyenne des variables pour le modèle")
                     
@@ -346,7 +348,6 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
                     
                     global_shap_values = get_global_shap_values(explainer, X_ref_processed)
                     
-                    # Logique SHAP 
                     if isinstance(global_shap_values, list):
                         shap_sum = np.abs(global_shap_values[1]).mean(axis=0) if len(global_shap_values) > 1 else np.abs(global_shap_values[0]).mean(axis=0) 
                     else:
@@ -354,7 +355,6 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
                     
                     
                     importance_df = pd.DataFrame({
-                        # Pour le graphique global, on utilise les noms des features traitées (features_names_processed)
                         'Feature': feature_names_processed, 
                         'Importance': shap_sum
                     }).sort_values(by='Importance', ascending=False).head(num_features_to_display)
@@ -366,10 +366,12 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
                     fig.update_layout(yaxis={'categoryorder':'total ascending'})
                     
                     st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': True}) 
-                    st.caption(f"Affiche les {num_features_to_display} variables qui ont, en moyenne, le plus grand impact sur la décision du modèle.")
+                    st.caption(f"Affiche les **{num_features_to_display} variables** qui ont, en moyenne, le plus grand impact sur la décision du modèle.")
 
             except Exception as e:
-                st.error(f"❌ Échec de l'Explication SHAP. Veuillez vérifier la configuration de votre modèle. Détail: {e}")
+                st.error(f"❌ Échec de l'Explication SHAP. Détail: {e}")
+        else:
+             st.warning("Impossible de générer les graphiques SHAP. Vérifiez que le modèle et les données de référence sont chargés correctement.")
 
     # --- CONTENU DE L'ONGLET 2 : COMPARAISON ---
     with tab_comparison:
@@ -429,4 +431,4 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
             st.plotly_chart(fig_biv, use_container_width=True, config={'displayModeBar': True})
 
 else:
-    st.info("Sélectionnez un client et cliquez sur **'2. Calculer le Score (API)'** dans la barre latérale pour démarrer l'analyse.")
+    st.info("Sélectionnez un client et cliquez sur **'Calculer le Score (API)'** dans la barre latérale pour démarrer l'analyse.")
