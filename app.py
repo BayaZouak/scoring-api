@@ -47,7 +47,6 @@ def load_model_and_explainer():
         
         explainer = shap.TreeExplainer(final_classifier, X_ref_processed)
         
-        # Le message de succès est retiré de la page principale comme demandé
         return model_pipeline, explainer, preprocessor_pipeline, X_ref_processed
         
     except Exception as e:
@@ -195,8 +194,8 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
                         base_value = explainer.expected_value[1]
                     except IndexError:
                         # Si l'index 1 n'existe pas, prendre l'index 0 (la seule sortie disponible)
-                        client_shap_values = shap_values[0][0]
-                        base_value = explainer.expected_value[0]
+                        client_shap_values = shap_values[0] # On enlève le double [0]
+                        base_value = explainer.expected_value # On suppose que la base est la valeur unique
                 else:
                     # Cas d'un tableau NumPy (sortie unique)
                     client_shap_values = shap_values[0] 
@@ -224,15 +223,21 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
             elif explanation_type == 'Globale (Modèle)':
                 st.markdown("#### Explication Globale : Importance moyenne des variables pour le modèle")
                 
+                # Correction Streamlit Cache pour explainer non hashable
                 @st.cache_data
-                def get_global_shap_values(explainer, X_ref_processed):
-                    return explainer.shap_values(X_ref_processed)
+                def get_global_shap_values(_explainer, X_ref_processed):
+                    return _explainer.shap_values(X_ref_processed)
                 
                 global_shap_values = get_global_shap_values(explainer, X_ref_processed)
                 
                 # Calculer la valeur absolue moyenne (gestion liste ou NumPy)
                 if isinstance(global_shap_values, list):
-                    shap_sum = np.abs(global_shap_values[1]).mean(axis=0)
+                    try:
+                        # Tenter l'accès classique à la classe 1
+                        shap_sum = np.abs(global_shap_values[1]).mean(axis=0)
+                    except IndexError:
+                        # Si l'index 1 est hors limites, utiliser l'index 0
+                        shap_sum = np.abs(global_shap_values[0]).mean(axis=0)
                 else:
                     shap_sum = np.abs(global_shap_values).mean(axis=0)
                 
