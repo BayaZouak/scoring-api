@@ -12,7 +12,7 @@ from typing import Optional
 
 # --- Configuration Globale ---
 API_URL = "https://scoring-api-latest.onrender.com/predict"
-BEST_THRESHOLD = 0.52
+BEST_THRESHOLD = 0.52 
 st.set_page_config(layout="wide", page_title="Dashboard Scoring Crédit")
 
 # --- Fonctions de Chargement ---
@@ -21,65 +21,65 @@ st.set_page_config(layout="wide", page_title="Dashboard Scoring Crédit")
 def load_data():
     """Charge l'échantillon client et les statistiques de la population."""
     try:
-        df_sample = pd.read_csv('client_sample_dashboard.csv')
-        client_ids = df_sample['SK_ID_CURR'].unique().tolist()
-
+        # NOTE: client_sample_dashboard.csv est désormais considéré comme le jeu de données de référence COMPLET
+        df_data = pd.read_csv('client_sample_dashboard.csv') 
+        client_ids = df_data['SK_ID_CURR'].unique().tolist()
+        
+        # Le fichier de statistiques reste utile, mais on pourrait aussi le calculer directement à partir de df_data
         with open('comparison_stats.json', 'r') as f:
             full_population_stats = json.load(f)
-
-        return df_sample, client_ids, full_population_stats
-
+            
+        return df_data, client_ids, full_population_stats
+        
     except FileNotFoundError as e:
         st.error(f"❌ Un fichier de données est manquant. Erreur: {e}")
         return pd.DataFrame(), [], {}
 
 @st.cache_resource
 def load_model_and_explainer():
-    """Charge le modèle et initialise l'explainer SHAP (pour l'explication locale)."""
+    """Charge le modèle et initialise l'explainer SHAP (pour l'explication locale et globale)."""
     try:
         model_pipeline = joblib.load('modele_de_scoring.pkl')
-        # Charger les données de référence pour l'explainer
         df_ref = pd.read_csv('client_sample_dashboard.csv').drop(columns=['SK_ID_CURR', 'TARGET'], errors='ignore')
 
-        # Extraire les composants du pipeline
         preprocessor_pipeline = Pipeline(model_pipeline.steps[:-1])
         final_classifier = model_pipeline.steps[-1][1]
-
-        # Prétraiter les données de fond
+        
         X_ref_processed = preprocessor_pipeline.transform(df_ref)
-
-        # Initialiser l'explainer SHAP
+        
+        # On calcule les valeurs SHAP pour le background (utilisation pour l'explication GLOBALE)
         explainer = shap.TreeExplainer(final_classifier, X_ref_processed)
-
-        st.success("✅ Modèle et Explainer SHAP chargés.")
-        return model_pipeline, explainer, preprocessor_pipeline
-
+        return model_pipeline, explainer, preprocessor_pipeline, X_ref_processed
+        
     except Exception as e:
-        st.error(f"❌ Erreur lors du chargement ou initialisation SHAP. Vérifiez le modèle .pkl. Détail: {e}")
-        return None, None, None
+        st.error(f"❌ Erreur critique lors du chargement ou initialisation SHAP. Détail: {e}")
+        return None, None, None, None
 
 # --- Chargement ---
-df_data, client_ids, full_population_stats = load_data()
-model_pipeline, explainer, preprocessor_pipeline = load_model_and_explainer()
+df_data, client_ids, full_population_stats = load_data() 
+model_pipeline, explainer, preprocessor_pipeline, X_ref_processed = load_model_and_explainer()
+
 
 # --- Fonction d'Appel de l'API ---
 def get_prediction_from_api(client_features):
     """Appelle l'API Render pour obtenir le score."""
     payload = {k: None if (pd.isna(v) or v == "") else v for k, v in client_features.items()}
-
+    
     try:
-        response = requests.post(API_URL, json=payload, timeout=30)
-        response.raise_for_status()
+        response = requests.post(API_URL, json=payload)
+        response.raise_for_status() 
         return response.json()
     except requests.exceptions.RequestException as e:
-        st.error(f"❌ Erreur de connexion ou API indisponible. Vérifiez l'URL: {API_URL}. Détail: {e}")
+        st.error(f"❌ Erreur de connexion ou API indisponible. Détail: {e}")
         return None
 
 # =============================================================================
 # MISE EN PAGE STREAMLIT
 # =============================================================================
 
-st.title("💳 Dashboard d'Analyse de Crédit (Explicabilité Client)")
+st.title("💳 Dashboard d'Analyse de Crédit")
+st.markdown("Outil d'aide à la décision pour l'octroi de prêts. Les données affichées reflètent les informations clients envoyées à l'API de scoring.")
+
 
 # --- Sélection Client et Modification ---
 st.sidebar.header("🔍 Sélection et Modification Client")
@@ -89,21 +89,20 @@ client_id = st.sidebar.selectbox(
     client_ids
 )
 
+# Chargement des données brutes du client sélectionné
 client_data_raw = df_data[df_data['SK_ID_CURR'] == client_id].iloc[0].to_dict()
 data_to_send = {'SK_ID_CURR': client_id}
 edited_data = {}
 
-# --- Formulaire de Modification ---
+# --- Formulaire de Modification  ---
 st.sidebar.markdown("### 📝 Modification des Données (API rafraîchie)")
 
 with st.sidebar.form(key=f"form_{client_id}"):
     for feature, value in client_data_raw.items():
         if feature not in ['SK_ID_CURR', 'TARGET']:
-            input_val = st.text_input(
-                f"{feature}",
-                value=str(value) if pd.notna(value) else "",
-                key=f"input_{feature}_{client_id}"
-            )
+            
+            input_val = st.text_input(f"{feature}", value=str(value) if pd.notna(value) else "", key=f"input_{feature}_{client_id}")
+
             try:
                 if input_val == "":
                     edited_data[feature] = np.nan
@@ -113,19 +112,20 @@ with st.sidebar.form(key=f"form_{client_id}"):
                     edited_data[feature] = int(input_val)
             except ValueError:
                 edited_data[feature] = input_val
-
+            
     submit_button = st.form_submit_button(label="📊 Calculer le Score (API)")
 
 if submit_button:
     data_to_send.update(edited_data)
     api_result = get_prediction_from_api(data_to_send)
-
+    
     if api_result:
         st.session_state['api_result'] = api_result
         st.session_state['current_client_data'] = data_to_send
         st.toast(f"Score pour le client {client_id} mis à jour!", icon='🚀')
-        st.rerun()
-
+        st.rerun() # Correction du st.experimental_rerun()
+        
+        
 # --- Affichage Principal ---
 if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CURR'] == client_id:
     result = st.session_state['api_result']
@@ -136,6 +136,9 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
 
     st.header(f"Client: {client_id} | Statut: {message}")
     st.markdown("---")
+
+    # --- 1. Score et Jauge ---
+    st.subheader("1. Score de Probabilité de Défaut")
 
     col_score, col_jauge, col_decision = st.columns([1, 2, 1])
 
@@ -154,7 +157,7 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
                 <p style="color: black;">{prob*100:.2f}% risque de défaut</p>
             </div>
         """, unsafe_allow_html=True)
-
+        
     with col_decision:
         color = "red" if decision == 1 else "green"
         st.markdown(f"**Décision Finale :** <span style='color:{color}; font-size: 1.5em;'>{message}</span>", unsafe_allow_html=True)
@@ -162,99 +165,153 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
     st.markdown("---")
 
     # =============================================================================
-    # 2. Explicabilité (SHAP Waterfall)
+    # 2. Explicabilité (Locale ou Globale)
     # =============================================================================
-    st.subheader("2. Explication Locale du Score (Facteurs de la Décision)")
-
-    if explainer and preprocessor_pipeline:
+    st.subheader("2. Explication des Facteurs de Décision")
+    
+    explanation_type = st.radio(
+        "Type d'Analyse :",
+        ('Locale (Client)', 'Globale (Modèle)'),
+        horizontal=True
+    )
+    
+    if explainer and preprocessor_pipeline and X_ref_processed is not None:
         try:
-            data_to_explain = st.session_state['current_client_data']
-            df_client = pd.DataFrame([data_to_explain]).drop(columns=['SK_ID_CURR'], errors='ignore')
-
-            X_client_processed = preprocessor_pipeline.transform(df_client)
-            shap_values = explainer.shap_values(X_client_processed)
-
-            # --- Gestion des cas selon la forme de shap_values ---
-            if isinstance(shap_values, list) and len(shap_values) > 1:
-                client_shap_values = shap_values[1][0]
-                base_value = explainer.expected_value[1]
-            else:
-                client_shap_values = shap_values[0]
-                if isinstance(explainer.expected_value, (list, np.ndarray)):
-                    base_value = explainer.expected_value[0]
+            if explanation_type == 'Locale (Client)':
+                st.markdown("#### Explication Locale : Facteurs influençant le score du client sélectionné")
+                
+                # --- Logique SHAP Locale ---
+                data_to_explain = st.session_state['current_client_data']
+                df_client = pd.DataFrame([data_to_explain]).drop(columns=['SK_ID_CURR', 'TARGET'], errors='ignore')
+                
+                X_client_processed = preprocessor_pipeline.transform(df_client) 
+                shap_values = explainer.shap_values(X_client_processed)
+                
+                # Index SHAP (gestion 2D ou 3D)
+                if isinstance(shap_values, list):
+                    client_shap_values = shap_values[1][0] 
+                    base_value = explainer.expected_value[1]
                 else:
-                    base_value = explainer.expected_value
+                    client_shap_values = shap_values[0] 
+                    base_value = explainer.expected_value if not isinstance(explainer.expected_value, np.ndarray) else explainer.expected_value[0]
 
-            e = shap.Explanation(
-                values=client_shap_values,
-                base_values=base_value,
-                feature_names=df_client.columns.tolist()
-            )
 
-            plt.rcParams.update({'figure.max_open_warning': 0})
-            fig, ax = plt.subplots(figsize=(12, 7))
-            shap.plots.waterfall(e, max_display=10, show=False)
-            st.pyplot(fig, use_container_width=True)
+                # Créer l'objet Explanation 
+                e = shap.Explanation(
+                    client_shap_values, 
+                    base_value, 
+                    feature_names=df_client.columns.tolist() 
+                )
+                
+                # Afficher le graphique Waterfall
+                plt.rcParams.update({'figure.max_open_warning': 0})
+                fig, ax = plt.subplots(figsize=(12, 7)) 
+                shap.plots.waterfall(e, max_display=10, show=False)
+                st.pyplot(fig, use_container_width=True)
+                
+                st.caption("Le rouge pousse vers le défaut, le bleu diminue le risque. Affiche les 10 facteurs les plus importants pour ce client.")
 
-            st.caption("🔴 augmente le risque (défaut), 🔵 diminue le risque. Les noms de colonnes sont bruts.")
+            elif explanation_type == 'Globale (Modèle)':
+                st.markdown("#### Explication Globale : Importance moyenne des variables pour le modèle")
+                
+                # --- Logique SHAP Globale (Importance Moyenne) ---
+                
+                @st.cache_data
+                def get_global_shap_values(explainer, X_ref_processed):
+                    return explainer.shap_values(X_ref_processed)
+                
+                global_shap_values = get_global_shap_values(explainer, X_ref_processed)
+                
+                # Prendre la valeur absolue moyenne de la classe 1 (défaut)
+                if isinstance(global_shap_values, list):
+                    # Cas binaire
+                    shap_sum = np.abs(global_shap_values[1]).mean(axis=0)
+                else:
+                    # Cas unique output (régression ou sortie unique)
+                    shap_sum = np.abs(global_shap_values).mean(axis=0)
+                
+                
+                feature_names = df_data.drop(columns=['SK_ID_CURR', 'TARGET'], errors='ignore').columns.tolist()
+                
+                importance_df = pd.DataFrame({
+                    'Feature': feature_names, 
+                    'Importance': shap_sum
+                }).sort_values(by='Importance', ascending=False).head(20) # Top 20
+
+                fig = px.bar(importance_df, x='Importance', y='Feature', orientation='h', 
+                             title="Top 20 des Variables les Plus Importantes (Moyenne Absolue des Valeurs SHAP)",
+                             color='Importance',
+                             color_continuous_scale=px.colors.sequential.OrRd)
+                fig.update_layout(yaxis={'categoryorder':'total ascending'})
+                st.plotly_chart(fig, use_container_width=True)
+                st.caption("Affiche les 20 variables qui ont, en moyenne, le plus grand impact sur la décision du modèle.")
 
         except Exception as e:
-            st.error(f"❌ Échec du calcul SHAP. Détail: {e}")
+            st.error(f"❌ Échec de l'Explication SHAP. Détail: {e}")
 
     st.markdown("---")
-
+    
     # =============================================================================
     # 3. Comparaison et Positionnement
     # =============================================================================
-    st.subheader("3. Comparaison aux Autres Clients")
-
+    st.subheader("3. Comparaison aux Autres Clients (Échantillon de Référence)")
+    
     col_feat_1, col_feat_2 = st.columns(2)
 
     with col_feat_1:
-        st.markdown("**Analyse Univariée : Client vs Population (Moyenne)**")
-
-        features_to_compare = [col for col in full_population_stats.keys()]
+        st.markdown("#### Analyse Univariée (Distribution)")
+        
+        features_to_compare = [col for col in full_population_stats.keys() if full_population_stats[col]['type'] == 'num']
         selected_feature = st.selectbox(
-            "Choisissez la caractéristique à comparer :",
+            "Choisissez la caractéristique numérique à comparer :",
             features_to_compare,
             key='feature_uni'
         )
-
-        stats_ref = full_population_stats.get(selected_feature)
+        
+        # --- Graphique Univarié (Box Plot ou Histogramme) ---
         client_val = current_data.get(selected_feature)
 
-        if stats_ref and stats_ref['type'] == 'num' and pd.notna(client_val):
-            st.metric(label="Valeur Client", value=f"{client_val:,.2f}")
-            st.metric(label="Moyenne Population", value=f"{stats_ref['mean']:,.2f}")
-            st.warning("Pour un Box Plot précis, toutes les données sont nécessaires. Affichage des métriques clés ci-dessus.")
-        elif stats_ref and stats_ref['type'] == 'cat':
-            client_cat = current_data.get(selected_feature)
-            st.markdown(f"**Valeur Client :** `{client_cat}`")
-            st.info("Cette variable est catégorielle.")
+        if pd.notna(client_val):
+            
+            # Créer l'histogramme de la distribution de l'échantillon
+            fig_dist = px.histogram(df_data, x=selected_feature, color='TARGET', 
+                                    opacity=0.6, marginal="box", 
+                                    title=f"Distribution de '{selected_feature}' dans l'Échantillon")
+
+            # Ajouter une ligne verticale pour le client actuel
+            fig_dist.add_vline(x=client_val, line_width=3, line_dash="dash", line_color="red", 
+                               annotation_text="Client Actuel", annotation_position="top right")
+
+            st.plotly_chart(fig_dist, use_container_width=True)
+            
+            st.metric(label="Valeur Client Actuelle", value=f"{client_val:,.2f}")
+            
         else:
-            st.warning("Données indisponibles ou non numériques pour la comparaison.")
+            st.warning("Variable non numérique ou valeur manquante pour la comparaison.")
+
 
     with col_feat_2:
-        st.markdown("**Analyse Bivariée : Échantillon Client**")
+        st.markdown("#### Analyse Bivariée (Positionnement)")
+        
+        # Filtrer uniquement les features numériques pour le scatter plot
+        num_features = [col for col in df_data.columns if df_data[col].dtype in [np.float64, np.int64] and col not in ['SK_ID_CURR', 'TARGET']]
 
-        feat_x = st.selectbox("Axe X :", features_to_compare, index=0, key='feat_x')
-        feat_y = st.selectbox("Axe Y :", features_to_compare, index=1, key='feat_y')
-
-        fig_biv = px.scatter(
-            df_data, x=feat_x, y=feat_y, color='TARGET',
-            title=f"Relation entre {feat_x} et {feat_y} (Échantillon)",
-            color_continuous_scale=px.colors.sequential.Sunset,
-            hover_data=['SK_ID_CURR']
-        )
-
+        feat_x = st.selectbox("Axe X :", num_features, index=0, key='feat_x')
+        feat_y = st.selectbox("Axe Y :", num_features, index=1, key='feat_y')
+        
+        # Utilise l'échantillon léger df_data pour le scatter plot
+        fig_biv = px.scatter(df_data, x=feat_x, y=feat_y, color='TARGET', 
+                              title=f"Relation entre {feat_x} et {feat_y} (Échantillon)",
+                              color_continuous_scale=px.colors.sequential.Sunset,
+                              hover_data=['SK_ID_CURR'])
+        
+        # Mettre en évidence le client sélectionné
         client_x = current_data.get(feat_x)
         client_y = current_data.get(feat_y)
-
+        
         if client_x is not None and client_y is not None:
-            fig_biv.add_scatter(
-                x=[client_x], y=[client_y], mode='markers', name='Client Actuel (Modifié)',
-                marker=dict(color='red', size=15, symbol='star', line=dict(width=2, color='DarkRed'))
-            )
+            fig_biv.add_scatter(x=[client_x], y=[client_y], mode='markers', name='Client Actuel', 
+                                 marker=dict(color='red', size=15, symbol='star', line=dict(width=2, color='DarkRed')))
 
         st.plotly_chart(fig_biv, use_container_width=True)
 
