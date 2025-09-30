@@ -46,19 +46,24 @@ def load_model_and_explainer():
         
         X_ref_processed = preprocessor_pipeline.transform(df_ref)
         
-        # OBTENIR LES NOMS DE COLONNES POST-PRÉTRAITEMENT (Crucial pour SHAP)
+        # OBTENIR LES NOMS DE COLONNES POST-PRÉTRAITEMENT 
         try:
+
             feature_names_processed = preprocessor_pipeline.get_feature_names_out().tolist()
         except AttributeError:
+            # Si get_feature_names_out n'est pas dispo, on utilise des noms génériques
             feature_names_processed = [f"Feature_{i}" for i in range(X_ref_processed.shape[1])]
             
         explainer = shap.TreeExplainer(final_classifier, X_ref_processed)
         
-        return model_pipeline, explainer, preprocessor_pipeline, X_ref_processed, feature_names_processed
+        # On renvoie aussi les noms des colonnes brutes du DF initial (pour SHAP local)
+        feature_names_raw = df_ref.columns.tolist()
+
+        return model_pipeline, explainer, preprocessor_pipeline, X_ref_processed, feature_names_processed, feature_names_raw
         
     except Exception as e:
         st.error(f"❌ Erreur critique lors du chargement ou initialisation SHAP. Détail: {e}")
-        return None, None, None, None, None
+        return None, None, None, None, None, None
 
 # --- Fonction de Jauge Plotly ---
 
@@ -96,7 +101,6 @@ def create_gauge_chart(probability, threshold):
             }}
     ))
     
-    # Correction: Pas de modebar_active ici
     fig.update_layout(height=400, margin=dict(l=10, r=10, t=50, b=10)) 
     return fig
 
@@ -116,40 +120,41 @@ def get_prediction_from_api(client_features):
 
 # --- Chargement ---
 df_data, client_ids, full_population_stats = load_data() 
-model_pipeline, explainer, preprocessor_pipeline, X_ref_processed, feature_names_processed = load_model_and_explainer()
+model_pipeline, explainer, preprocessor_pipeline, X_ref_processed, feature_names_processed, feature_names_raw = load_model_and_explainer()
 
 # =============================================================================
 # MISE EN PAGE STREAMLIT
 # =============================================================================
 
-# --- En-tête avec Logo et Titres (Centrage Amélioré et Logo Compact) ---
+# --- En-tête (Centrage du Titre) ---
 st.markdown("<style>.block-container {padding-top: 1rem;}</style>", unsafe_allow_html=True)
 
-# NOUVEAU RATIO : [ Espace_Gauche, Logo (1.0), Titre (4.2), Espace_Droit ]
-col_space_l, col_logo, col_title, col_space_r = st.columns([0.5, 1, 4.2, 0.5]) 
+# Centrage du titre sans colonnes
+st.markdown(
+    """
+    <div style='text-align: center;'>
+        <h1>Dashboard d'Analyse de Crédit</h1>
+        <p>Outil d'aide à la décision pour l'octroi de prêts.</p>
+    </div>
+    """, 
+    unsafe_allow_html=True
+)
 
-with col_logo:
-    try:
-        st.image(
-            'logo_entreprise.png', 
-            use_container_width=True # Correction de l'avertissement Streamlit
-        ) 
-    except FileNotFoundError:
-        st.warning("⚠️ Logo non trouvé.")
-        
-with col_title:
-    # Centrage du titre et du sous-titre dans l'espace alloué (col_title)
-    st.markdown(
-        """
-        <div style='text-align: center;'>
-            <h1>Dashboard d'Analyse de Crédit</h1>
-            <p>Outil d'aide à la décision pour l'octroi de prêts.</p>
-        </div>
-        """, 
-        unsafe_allow_html=True
-    )
 
-# --- Barre Latérale (Ergonomie Améliorée) ---
+# --- Barre Latérale  ---
+
+# Affichage du logo dans la barre latérale
+st.sidebar.markdown("---")
+st.sidebar.markdown("### 🏛️ Organisation")
+try:
+    st.sidebar.image(
+        'logo_entreprise.png', 
+        use_container_width=True
+    ) 
+except FileNotFoundError:
+    st.sidebar.warning("⚠️ Logo non trouvé.")
+st.sidebar.markdown("---")
+
 st.sidebar.header("🔍 Sélection Client")
 
 client_id = st.sidebar.selectbox(
@@ -161,8 +166,8 @@ client_data_raw = df_data[df_data['SK_ID_CURR'] == client_id].iloc[0].to_dict()
 data_to_send = {'SK_ID_CURR': client_id}
 edited_data = {}
 
-# --- Bouton de Score Rapide (Monté en Haut) ---
-if st.sidebar.button("2. Calculer le Score (API)", key="calculate_score_quick"):
+# --- Bouton de Score Rapide ---
+if st.sidebar.button("Calculer le Score (API)", key="calculate_score_quick"):
     data_to_send.update({k: v for k, v in client_data_raw.items() if k not in ['SK_ID_CURR', 'TARGET']})
     api_result = get_prediction_from_api(data_to_send)
     
@@ -172,9 +177,9 @@ if st.sidebar.button("2. Calculer le Score (API)", key="calculate_score_quick"):
         st.toast(f"Score pour le client {client_id} calculé!", icon='🚀')
         st.rerun()
 
-# --- Formulaire de Modification (Séparé) ---
+# --- Formulaire de Modification  ---
 st.sidebar.markdown("---")
-st.sidebar.markdown("### 📝 3. Modification des Données (Optionnel)")
+st.sidebar.markdown("### 📝 Modification des Données")
 
 with st.sidebar.form(key=f"form_{client_id}"):
     st.markdown("Modifiez les variables ci-dessous pour simuler un nouveau score :")
@@ -182,6 +187,7 @@ with st.sidebar.form(key=f"form_{client_id}"):
     for feature, value in client_data_raw.items():
         if feature not in ['SK_ID_CURR', 'TARGET']:
             
+            # Utilisation de colonnes simplifiée
             col_label, col_input = st.columns([1.5, 2])
             with col_input:
                 input_val = st.text_input(
@@ -215,8 +221,6 @@ if submit_button_mod:
         st.session_state['current_client_data'] = data_to_send
         st.toast(f"Score pour le client {client_id} (modifié) mis à jour!", icon='🔄')
         st.rerun()
-
-        
         
 # --- Affichage Principal ---
 if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CURR'] == client_id:
@@ -231,7 +235,7 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
     # =============================================================================
     # 1. Score et Jauge (SECTION FIXE)
     # =============================================================================
-    st.subheader("1. Score de Probabilité de Défaut et Confiance")
+    st.subheader("Score de Probabilité de Défaut et Confiance")
 
     col_score, col_jauge, col_decision = st.columns([1, 2, 1])
 
@@ -241,7 +245,6 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
         
     with col_jauge:
         gauge_fig = create_gauge_chart(prob, BEST_THRESHOLD)
-        # Activation du modebar pour la jauge
         st.plotly_chart(gauge_fig, use_container_width=True, config={'displayModeBar': True}) 
         
     with col_decision:
@@ -251,7 +254,7 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
 
     # --- DÉTAILS DU CLIENT DÉFILABLES ---
     st.markdown("---")
-    st.subheader("Détails des Variables du Client")
+    st.subheader("Informations client")
     
     df_details = pd.Series(
         {k: v for k, v in current_data.items() if k not in ['SK_ID_CURR', 'TARGET']}
@@ -265,7 +268,7 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
     # =============================================================================
     # 2 & 3. Explicabilité et Comparaison (ONGLETS INTERACTIFS)
     # =============================================================================
-    tab_explicability, tab_comparison = st.tabs(["2. Explication des Facteurs (SHAP)", "3. Comparaison aux Autres Clients"])
+    tab_explicability, tab_comparison = st.tabs(["Explication des Facteurs (SHAP)", "Comparaison aux Autres Clients"])
 
     # --- CONTENU DE L'ONGLET 1 : EXPLICATION SHAP ---
     with tab_explicability:
@@ -313,17 +316,23 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
                     else:
                         client_shap_values = shap_values[0] 
                         base_value = explainer.expected_value if not isinstance(explainer.expected_value, (np.ndarray, list)) else explainer.expected_value[0]
-
+                    
                     e = shap.Explanation(
                         client_shap_values, 
                         base_value, 
-                        feature_names=feature_names_processed 
+                        data=df_client.iloc[0].values, 
+                        feature_names=df_client.columns.tolist() 
                     )
                     
                     plt.rcParams.update({'figure.max_open_warning': 0})
-                    # CHANGEMENT ICI : Augmentation de la taille de la figure pour "dézoomer"
+                    # Augmentation de la taille de la figure pour "dézoomer" 
                     fig, ax = plt.subplots(figsize=(15, 9)) 
+                    # shap.plots.waterfall(e, max_display=num_features_to_display, show=False)
+                    
+                    # Affichage explicite des noms pour le waterfall SHAP
+                    # On utilise l'objet Explanation avec les noms de colonnes du DF non transformé
                     shap.plots.waterfall(e, max_display=num_features_to_display, show=False)
+                    
                     st.pyplot(fig, use_container_width=True)
                     
                     st.caption(f"Le rouge pousse vers le défaut, le bleu diminue le risque. Affiche les {num_features_to_display} facteurs les plus importants pour ce client.")
@@ -337,7 +346,7 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
                     
                     global_shap_values = get_global_shap_values(explainer, X_ref_processed)
                     
-                    # Logique SHAP (Correction)
+                    # Logique SHAP 
                     if isinstance(global_shap_values, list):
                         shap_sum = np.abs(global_shap_values[1]).mean(axis=0) if len(global_shap_values) > 1 else np.abs(global_shap_values[0]).mean(axis=0) 
                     else:
@@ -345,6 +354,7 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
                     
                     
                     importance_df = pd.DataFrame({
+                        # Pour le graphique global, on utilise les noms des features traitées (features_names_processed)
                         'Feature': feature_names_processed, 
                         'Importance': shap_sum
                     }).sort_values(by='Importance', ascending=False).head(num_features_to_display)
@@ -352,10 +362,9 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
                     fig = px.bar(importance_df, x='Importance', y='Feature', orientation='h', 
                                  title=f"Top {num_features_to_display} des Variables les Plus Importantes (Moyenne Absolue des Valeurs SHAP)",
                                  color='Importance',
-                                 color_continuous_scale=px.colors.sequential.Blues) # COULEUR BLEUE
+                                 color_continuous_scale=px.colors.sequential.Blues) 
                     fig.update_layout(yaxis={'categoryorder':'total ascending'})
                     
-                    # Ajout du modebar interactif
                     st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': True}) 
                     st.caption(f"Affiche les {num_features_to_display} variables qui ont, en moyenne, le plus grand impact sur la décision du modèle.")
 
@@ -364,7 +373,7 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
 
     # --- CONTENU DE L'ONGLET 2 : COMPARAISON ---
     with tab_comparison:
-        st.subheader("3. Comparaison et Positionnement Client (Échantillon de Référence)")
+        st.subheader("Comparaison et Positionnement Client (Échantillon de Référence)")
         
         col_feat_1, col_feat_2 = st.columns(2)
 
@@ -389,7 +398,6 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
                 fig_dist.add_vline(x=client_val, line_width=3, line_dash="dash", line_color="red", 
                                    annotation_text="Client Actuel", annotation_position="top right")
 
-                # Ajout du modebar interactif
                 st.plotly_chart(fig_dist, use_container_width=True, config={'displayModeBar': True})
                 
                 st.metric(label="Valeur Client Actuelle", value=f"{client_val:,.2f}")
@@ -418,7 +426,6 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
                 fig_biv.add_scatter(x=[client_x], y=[client_y], mode='markers', name='Client Actuel', 
                                      marker=dict(color='red', size=15, symbol='star', line=dict(width=2, color='DarkRed')))
 
-            # Ajout du modebar interactif
             st.plotly_chart(fig_biv, use_container_width=True, config={'displayModeBar': True})
 
 else:
