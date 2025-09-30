@@ -26,8 +26,7 @@ def load_data():
     try:
         df_data = pd.read_csv('client_sample_dashboard.csv') 
         client_ids = df_data['SK_ID_CURR'].unique().tolist()
-        
-        # Le fichier de comparaison est conservé, car il ne concerne pas les noms SHAP
+
         with open('comparison_stats.json', 'r') as f:
             full_population_stats = json.load(f)
             
@@ -41,12 +40,10 @@ def load_data():
 def load_model_and_explainer():
     
     # --- FONCTION D'EXTRACTION MANUELLE DES NOMS DE FEATURES ---
-    # Si get_feature_names_out() échoue, on tente de reconstruire les noms.
     def get_feature_names_manually(preprocessor_pipeline, raw_feature_names):
         feature_names_processed = []
         try:
             # 1. Obtenir le ColumnTransformer (en supposant qu'il soit la seule étape)
-            # Sinon, il faut adapter le nom de l'étape : e.g., preprocessor_pipeline.named_steps['column_transformer_step']
             if isinstance(preprocessor_pipeline, ColumnTransformer):
                 ct = preprocessor_pipeline
             else:
@@ -58,7 +55,6 @@ def load_model_and_explainer():
                 
                 # Le 'remainder' renvoie les noms bruts des colonnes non transformées
                 if name == 'remainder':
-                    # Dans les versions récentes, 'remainder' retourne 'passthrough' et on gère les colonnes restantes
                     if transformer == 'passthrough':
                         # Trouver les noms de colonnes non utilisées par d'autres transformateurs
                         cols_used = set()
@@ -71,16 +67,15 @@ def load_model_and_explainer():
                         remainder_cols = [col for col in raw_feature_names if col not in cols_used]
                         feature_names_processed.extend(remainder_cols)
                     else:
-                        # Si le remainder fait une transformation (rare), on gère ici si besoin
+                        # Si le remainder fait une transformation, on gère ici si besoin
                         pass 
                 
                 # Pour les transformateurs spécifiques (ex: num, cat)
                 elif transformer != 'drop':
-                    # Les transformateurs ayant 'get_feature_names_out' sont généralement les encodeurs (OneHot)
                     if hasattr(transformer, 'get_feature_names_out'):
                         # Utilisation de la méthode spécifique du transformateur (plus fiable que le CT)
                         names_out = transformer.get_feature_names_out(features)
-                        # On applique votre nettoyage (retirer le préfixe)
+                        # On applique le nettoyage (retirer le préfixe)
                         feature_names_processed.extend([n.split('__')[-1] for n in names_out])
                     else:
                         # Pour les Standard Scaler, Imputer, etc., les noms ne changent pas
@@ -89,7 +84,6 @@ def load_model_and_explainer():
                         elif isinstance(features, list):
                             feature_names_processed.extend(features)
                         
-            st.sidebar.success("✅ Noms de features extraits manuellement!")
             return feature_names_processed
 
         except Exception as e:
@@ -118,7 +112,7 @@ def load_model_and_explainer():
             feature_names_processed = [name.split('__')[-1] for name in feature_names_full]
             st.sidebar.success("✅ Noms de features récupérés via get_feature_names_out()!")
         except Exception:
-            # 2. Si échec (votre cas), utiliser la fonction d'extraction manuelle
+            # 2. Si échec, utiliser la fonction d'extraction manuelle
             feature_names_processed = get_feature_names_manually(preprocessor_pipeline, feature_names_raw)
         
         # ----------------------------------------------------------------------
@@ -133,7 +127,7 @@ def load_model_and_explainer():
         st.error(f"❌ Erreur critique lors du chargement ou initialisation. Détail: {e}")
         return None, None, None, None, None, None
 
-# --- Fonction de Jauge Plotly (Aucun changement nécessaire) ---
+# --- Fonction de Jauge Plotly ---
 
 def create_gauge_chart(probability, threshold):
     
@@ -169,7 +163,7 @@ def create_gauge_chart(probability, threshold):
     return fig
 
 
-# --- Fonction d'Appel de l'API (Aucun changement nécessaire) ---
+# --- Fonction d'Appel de l'API  ---
 def get_prediction_from_api(client_features):
     payload = {k: None if (pd.isna(v) or v == "") else v for k, v in client_features.items()}
     
@@ -208,7 +202,6 @@ st.markdown(
 
 # Affichage du logo dans la barre latérale
 try:
-    # Utilisez 'logo_entreprise.png' si vous l'avez, sinon retirez cette ligne.
     st.sidebar.image(
         'logo_entreprise.png', 
         use_container_width=True
@@ -220,7 +213,7 @@ st.sidebar.markdown("---")
 st.sidebar.header("🔍 Sélection Client")
 
 client_id = st.sidebar.selectbox(
-    "1. Choisissez le SK_ID_CURR :",
+    "Choisissez le SK_ID_CURR :",
     client_ids
 )
 
@@ -287,7 +280,6 @@ if submit_button_mod:
         st.rerun()
         
 # --- Affichage Principal ---
-# Affiche la page principale uniquement si un score a été calculé et correspond au client actuel
 if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CURR'] == client_id:
     result = st.session_state['api_result']
     prob = result['probability']
@@ -450,7 +442,7 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
         else:
              st.warning("Impossible de générer les graphiques SHAP. Vérifiez que le modèle et les données de référence sont chargés correctement.")
 
-    # --- CONTENU DE L'ONGLET 2 : COMPARAISON (Aucun changement nécessaire) ---
+    # --- CONTENU DE L'ONGLET 2 : COMPARAISON  ---
     with tab_comparison:
         st.subheader("Comparaison et Positionnement Client (Échantillon de Référence)")
         
