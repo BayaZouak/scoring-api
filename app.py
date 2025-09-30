@@ -134,8 +134,15 @@ with col_logo:
         st.warning("⚠️ Logo non trouvé.")
         
 with col_title:
-    st.title("Dashboard d'Analyse de Crédit") 
-    st.markdown("<p align='center'>Outil d'aide à la décision pour l'octroi de prêts.</p>", unsafe_allow_html=True)
+    st.markdown(
+        """
+        <div style='text-align: center;'>
+            <h1>Dashboard d'Analyse de Crédit</h1>
+            <p>Outil d'aide à la décision pour l'octroi de prêts.</p>
+        </div>
+        """, 
+        unsafe_allow_html=True
+    )
 
 
 # --- Barre Latérale  ---
