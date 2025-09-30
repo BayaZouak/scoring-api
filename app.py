@@ -81,11 +81,14 @@ def create_gauge_chart(probability, threshold):
             'bgcolor': "white",
             'borderwidth': 2,
             'bordercolor': "gray",
+            # Le rouge va de 0 à 48% (Seuil de confiance)
             'steps': [
                 {'range': [0, confidence_threshold], 'color': "red"},    
                 {'range': [confidence_threshold, 100], 'color': "green"} 
             ],
+            # Le 'bar' est le curseur noir
             'bar': {'color': 'black', 'thickness': 0.15}, 
+            # Le 'threshold' marque la limite 
             'threshold': {
                 'line': {'color': "black", 'width': 4},
                 'thickness': 0.75,
@@ -93,7 +96,7 @@ def create_gauge_chart(probability, threshold):
             }}
     ))
     
-   
+    # Correction: Pas de modebar_active ici
     fig.update_layout(height=400, margin=dict(l=10, r=10, t=50, b=10)) 
     return fig
 
@@ -119,21 +122,23 @@ model_pipeline, explainer, preprocessor_pipeline, X_ref_processed, feature_names
 # MISE EN PAGE STREAMLIT
 # =============================================================================
 
-# --- En-tête avec Logo et Titres (CORRIGÉ) ---
+# --- En-tête avec Logo et Titres (Centrage Amélioré et Logo Compact) ---
 st.markdown("<style>.block-container {padding-top: 1rem;}</style>", unsafe_allow_html=True)
 
-col_logo, col_title = st.columns([1.2, 4]) 
+# NOUVEAU RATIO : [ Espace_Gauche, Logo (1.0), Titre (4.2), Espace_Droit ]
+col_space_l, col_logo, col_title, col_space_r = st.columns([0.5, 1, 4.2, 0.5]) 
+
 with col_logo:
     try:
         st.image(
             'logo_entreprise.png', 
-            use_container_width=True, 
-            width=150 
+            use_container_width=True # Correction de l'avertissement Streamlit
         ) 
     except FileNotFoundError:
         st.warning("⚠️ Logo non trouvé.")
         
 with col_title:
+    # Centrage du titre et du sous-titre dans l'espace alloué (col_title)
     st.markdown(
         """
         <div style='text-align: center;'>
@@ -144,8 +149,7 @@ with col_title:
         unsafe_allow_html=True
     )
 
-
-# --- Barre Latérale  ---
+# --- Barre Latérale (Ergonomie Améliorée) ---
 st.sidebar.header("🔍 Sélection Client")
 
 client_id = st.sidebar.selectbox(
@@ -157,8 +161,8 @@ client_data_raw = df_data[df_data['SK_ID_CURR'] == client_id].iloc[0].to_dict()
 data_to_send = {'SK_ID_CURR': client_id}
 edited_data = {}
 
-# --- Bouton de Score Rapide  ---
-if st.sidebar.button("Calculer le Score (API)", key="calculate_score_quick"):
+# --- Bouton de Score Rapide (Monté en Haut) ---
+if st.sidebar.button("2. Calculer le Score (API)", key="calculate_score_quick"):
     data_to_send.update({k: v for k, v in client_data_raw.items() if k not in ['SK_ID_CURR', 'TARGET']})
     api_result = get_prediction_from_api(data_to_send)
     
@@ -168,9 +172,9 @@ if st.sidebar.button("Calculer le Score (API)", key="calculate_score_quick"):
         st.toast(f"Score pour le client {client_id} calculé!", icon='🚀')
         st.rerun()
 
-# --- Formulaire de Modification  ---
+# --- Formulaire de Modification (Séparé) ---
 st.sidebar.markdown("---")
-st.sidebar.markdown("### 📝 Modification des Données")
+st.sidebar.markdown("### 📝 3. Modification des Données (Optionnel)")
 
 with st.sidebar.form(key=f"form_{client_id}"):
     st.markdown("Modifiez les variables ci-dessous pour simuler un nouveau score :")
@@ -296,7 +300,7 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
                     df_client = pd.DataFrame([data_to_explain]).drop(columns=['SK_ID_CURR', 'TARGET'], errors='ignore')
                     X_client_processed = preprocessor_pipeline.transform(df_client) 
                     
-                    # Logique SHAP 
+                    # Logique SHAP (Correction)
                     shap_values = explainer.shap_values(X_client_processed)
                     
                     if isinstance(shap_values, list):
@@ -317,7 +321,8 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
                     )
                     
                     plt.rcParams.update({'figure.max_open_warning': 0})
-                    fig, ax = plt.subplots(figsize=(12, 7)) 
+                    # CHANGEMENT ICI : Augmentation de la taille de la figure pour "dézoomer"
+                    fig, ax = plt.subplots(figsize=(15, 9)) 
                     shap.plots.waterfall(e, max_display=num_features_to_display, show=False)
                     st.pyplot(fig, use_container_width=True)
                     
@@ -332,7 +337,7 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
                     
                     global_shap_values = get_global_shap_values(explainer, X_ref_processed)
                     
-                    # Logique SHAP 
+                    # Logique SHAP (Correction)
                     if isinstance(global_shap_values, list):
                         shap_sum = np.abs(global_shap_values[1]).mean(axis=0) if len(global_shap_values) > 1 else np.abs(global_shap_values[0]).mean(axis=0) 
                     else:
@@ -347,10 +352,10 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
                     fig = px.bar(importance_df, x='Importance', y='Feature', orientation='h', 
                                  title=f"Top {num_features_to_display} des Variables les Plus Importantes (Moyenne Absolue des Valeurs SHAP)",
                                  color='Importance',
-                                 color_continuous_scale=px.colors.sequential.Blues) 
+                                 color_continuous_scale=px.colors.sequential.Blues) # COULEUR BLEUE
                     fig.update_layout(yaxis={'categoryorder':'total ascending'})
                     
-                    # modebar interactif
+                    # Ajout du modebar interactif
                     st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': True}) 
                     st.caption(f"Affiche les {num_features_to_display} variables qui ont, en moyenne, le plus grand impact sur la décision du modèle.")
 
@@ -384,7 +389,7 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
                 fig_dist.add_vline(x=client_val, line_width=3, line_dash="dash", line_color="red", 
                                    annotation_text="Client Actuel", annotation_position="top right")
 
-                # modebar interactif
+                # Ajout du modebar interactif
                 st.plotly_chart(fig_dist, use_container_width=True, config={'displayModeBar': True})
                 
                 st.metric(label="Valeur Client Actuelle", value=f"{client_val:,.2f}")
@@ -413,7 +418,7 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
                 fig_biv.add_scatter(x=[client_x], y=[client_y], mode='markers', name='Client Actuel', 
                                      marker=dict(color='red', size=15, symbol='star', line=dict(width=2, color='DarkRed')))
 
-            #  modebar interactif
+            # Ajout du modebar interactif
             st.plotly_chart(fig_biv, use_container_width=True, config={'displayModeBar': True})
 
 else:
