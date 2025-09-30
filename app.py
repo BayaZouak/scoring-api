@@ -49,15 +49,15 @@ def load_model_and_explainer():
         try:
             feature_names_processed = preprocessor_pipeline.get_feature_names_out().tolist()
         except (AttributeError, TypeError):
-            # Si get_feature_names_out échoue, on doit utiliser des noms génériques
+            # Si get_feature_names_out échoue, on utilise des noms génériques, mais on continue
             feature_names_processed = [f"Feature_{i}" for i in range(X_ref_processed.shape[1])]
             
         explainer = shap.TreeExplainer(final_classifier, X_ref_processed)
         
-        # feature_names_raw n'est plus utile dans la signature, mais on le garde pour compatibilité
+        # Noms des features brutes (pour SHAP local si le preprocessing ne donne pas de noms lisibles)
         feature_names_raw = df_ref.columns.tolist() 
 
-        # On retourne X_ref_processed (pour SHAP global) et feature_names_processed (pour les deux)
+        # On retourne X_ref_processed et les noms transformés et bruts
         return model_pipeline, explainer, preprocessor_pipeline, X_ref_processed, feature_names_processed, feature_names_raw
         
     except Exception as e:
@@ -138,8 +138,6 @@ st.markdown(
 # --- Barre Latérale  ---
 
 # Affichage du logo dans la barre latérale
-st.sidebar.markdown("---")
-st.sidebar.markdown("### 🏛️ Organisation")
 try:
     st.sidebar.image(
         'logo_entreprise.png', 
@@ -278,7 +276,7 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
         
         with col_slider:
             if feature_names_processed is not None:
-                max_features_display = min(20, len(feature_names_processed))
+                max_features_display = min(20, len(feature_names_raw)) # Utiliser la longueur de la liste RAW si c'est plus clair
                 num_features_to_display = st.slider(
                     "Nombre de variables à afficher :",
                     min_value=5,
@@ -322,16 +320,23 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
                     else:
                         client_data = X_client_processed[0]
                         
-                    # Création de l'objet Explanation ALIGNÉ (shap_values, data et feature_names sont de la même longueur)
+                    # CRÉATION DE L'OBJET EXPLANATION (utilise les noms post-traitement)
+                    # Note : Si les noms post-traitement sont illisibles, ceci affichera les noms illisibles.
+                    # Pour utiliser les noms bruts, il faudrait s'assurer que l'alignement est correct, ce qui est très risqué.
+                    # Nous utilisons donc feature_names_processed
                     e = shap.Explanation(
                         client_shap_values, 
                         base_value, 
                         data=client_data, 
-                        feature_names=feature_names_processed 
+                        feature_names=feature_names_processed
                     )
                     
                     plt.rcParams.update({'figure.max_open_warning': 0})
-                    fig, ax = plt.subplots(figsize=(15, 9)) 
+                    
+                    # Augmente la taille de la figure pour le waterfall (pour dézoomer)
+                    fig_height = max(5, num_features_to_display * 0.7) 
+                    fig, ax = plt.subplots(figsize=(15, fig_height))
+                    
                     shap.plots.waterfall(e, max_display=num_features_to_display, show=False)
                     
                     st.pyplot(fig, use_container_width=True)
@@ -342,6 +347,7 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
                 elif explanation_type == 'Globale (Modèle)':
                     st.markdown("#### Explication Globale : Importance moyenne des variables pour le modèle")
                     
+                    # Utiliser l'objet explainer directement avec X_ref_processed (déjà en cache)
                     @st.cache_data
                     def get_global_shap_values(_explainer, X_ref_processed):
                         return _explainer.shap_values(X_ref_processed)
@@ -353,7 +359,7 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
                     else:
                         shap_sum = np.abs(global_shap_values).mean(axis=0)
                     
-                    
+                    # Utilisation des noms post-traitement (feature_names_processed)
                     importance_df = pd.DataFrame({
                         'Feature': feature_names_processed, 
                         'Importance': shap_sum
