@@ -5,7 +5,7 @@ import requests
 import json
 import joblib
 import plotly.express as px
-import plotly.graph_objects as go # Ajout de go pour la jauge
+import plotly.graph_objects as go
 import shap
 import matplotlib.pyplot as plt
 from sklearn.pipeline import Pipeline
@@ -72,7 +72,7 @@ def create_gauge_chart(probability, threshold):
         gauge = {
             'shape': "angular",
             'axis': {'range': [0, 100], 'tickwidth': 1, 'tickcolor': "darkblue"},
-            'bar': {'color': "rgba(0,0,0,0)"}, # Barre transparente pour se concentrer sur les étapes
+            'bar': {'color': "rgba(0,0,0,0)"},
             'bgcolor': "white",
             'borderwidth': 2,
             'bordercolor': "gray",
@@ -116,15 +116,27 @@ model_pipeline, explainer, preprocessor_pipeline, X_ref_processed = load_model_a
 # MISE EN PAGE STREAMLIT
 # =============================================================================
 
-st.title("💳 Dashboard d'Analyse de Crédit")
-st.markdown("Outil d'aide à la décision pour l'octroi de prêts.")
+# --- En-tête avec Logo (NOUVEAUTÉ) ---
+st.markdown("<style>.block-container {padding-top: 1rem;}</style>", unsafe_allow_html=True)
+
+col_logo, col_title = st.columns([1, 4])
+with col_logo:
+    # AFFICHE LE LOGO DE L'ENTREPRISE (Assurez-vous que le fichier est présent)
+    try:
+        st.image('logo_entreprise.png', width=100)
+    except FileNotFoundError:
+        st.warning("⚠️ Logo non trouvé. Ajoutez 'logo_entreprise.png' à la racine du projet.")
+        
+with col_title:
+    st.title("💳 Dashboard d'Analyse de Crédit")
+    st.markdown("Outil d'aide à la décision pour l'octroi de prêts.")
 
 
-# --- Sélection Client et Modification ---
-st.sidebar.header("🔍 Sélection et Modification Client")
+# --- Barre Latérale (Améliorée) ---
+st.sidebar.header("🔍 Sélection Client")
 
 client_id = st.sidebar.selectbox(
-    "Sélectionnez le SK_ID_CURR du client :",
+    "1. Choisissez le SK_ID_CURR :",
     client_ids
 )
 
@@ -132,14 +144,40 @@ client_data_raw = df_data[df_data['SK_ID_CURR'] == client_id].iloc[0].to_dict()
 data_to_send = {'SK_ID_CURR': client_id}
 edited_data = {}
 
-# --- Formulaire de Modification  ---
-st.sidebar.markdown("### 📝 Modification des Données (API rafraîchie)")
+# --- Bouton de Score Rapide (Monté en Haut) ---
+if st.sidebar.button("2. Calculer le Score (API)", key="calculate_score_quick"):
+    # Si le bouton rapide est cliqué, nous envoyons les données brutes (non modifiées)
+    data_to_send.update({k: v for k, v in client_data_raw.items() if k not in ['SK_ID_CURR', 'TARGET']})
+    api_result = get_prediction_from_api(data_to_send)
+    
+    if api_result:
+        st.session_state['api_result'] = api_result
+        st.session_state['current_client_data'] = data_to_send
+        st.toast(f"Score pour le client {client_id} calculé!", icon='🚀')
+        st.rerun()
+
+# --- Formulaire de Modification (Séparé) ---
+st.sidebar.markdown("---")
+st.sidebar.markdown("### 📝 3. Modification des Données (Optionnel)")
 
 with st.sidebar.form(key=f"form_{client_id}"):
+    st.markdown("Modifiez les variables ci-dessous pour simuler un nouveau score :")
+    
     for feature, value in client_data_raw.items():
         if feature not in ['SK_ID_CURR', 'TARGET']:
             
-            input_val = st.text_input(f"{feature}", value=str(value) if pd.notna(value) else "", key=f"input_{feature}_{client_id}")
+            # Utilisation de la colonne pour condenser l'affichage
+            col_label, col_input = st.columns([1.5, 2])
+            with col_input:
+                input_val = st.text_input(
+                    f"{feature}", 
+                    value=str(value) if pd.notna(value) else "", 
+                    key=f"input_{feature}_{client_id}", 
+                    label_visibility="collapsed"
+                )
+                
+            with col_label:
+                 st.caption(f"{feature}")
 
             try:
                 if input_val == "":
@@ -151,17 +189,18 @@ with st.sidebar.form(key=f"form_{client_id}"):
             except ValueError:
                 edited_data[feature] = input_val
             
-    submit_button = st.form_submit_button(label="📊 Calculer le Score (API)")
+    submit_button_mod = st.form_submit_button(label="🔄 Recalculer le Score (Après Modification)")
 
-if submit_button:
+if submit_button_mod:
     data_to_send.update(edited_data)
     api_result = get_prediction_from_api(data_to_send)
     
     if api_result:
         st.session_state['api_result'] = api_result
         st.session_state['current_client_data'] = data_to_send
-        st.toast(f"Score pour le client {client_id} mis à jour!", icon='🚀')
+        st.toast(f"Score pour le client {client_id} (modifié) mis à jour!", icon='🔄')
         st.rerun()
+
         
         
 # --- Affichage Principal ---
@@ -172,9 +211,8 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
     message = result['decision_message']
     current_data = st.session_state['current_client_data']
 
-    st.header(f"Client: {client_id} | Statut: {message}")
     st.markdown("---")
-
+    
     # =============================================================================
     # 1. Score et Jauge (SECTION FIXE)
     # =============================================================================
@@ -198,7 +236,7 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
     st.markdown("---")
 
     # =============================================================================
-    # 2. Explicabilité et Comparaison (ONGLETS INTERACTIFS)
+    # 2 & 3. Explicabilité et Comparaison (ONGLETS INTERACTIFS)
     # =============================================================================
     tab_explicability, tab_comparison = st.tabs(["2. Explication des Facteurs (SHAP)", "3. Comparaison aux Autres Clients"])
 
@@ -234,20 +272,21 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
                     data_to_explain = st.session_state['current_client_data']
                     df_client = pd.DataFrame([data_to_explain]).drop(columns=['SK_ID_CURR', 'TARGET'], errors='ignore')
                     X_client_processed = preprocessor_pipeline.transform(df_client) 
+                    
+                    # --- NOUVELLE LOGIQUE SHAP LOCALE (ROBUSTE) ---
                     shap_values = explainer.shap_values(X_client_processed)
                     
-                    # Gestion de l'index SHAP (corrigé)
                     if isinstance(shap_values, list):
-                        try:
-                            client_shap_values = shap_values[1][0] 
+                        # Modèles multi-classes ou binaires avec deux sorties
+                        if len(shap_values) > 1:
+                            client_shap_values = shap_values[1][0] # Risque de défaut (classe 1)
                             base_value = explainer.expected_value[1]
-                        except IndexError:
-                            client_shap_values = shap_values[0] 
-                            if isinstance(explainer.expected_value, np.ndarray) or isinstance(explainer.expected_value, list):
-                                base_value = explainer.expected_value[0]
-                            else:
-                                base_value = explainer.expected_value
+                        else:
+                            # Modèle binaire avec une seule sortie (classe 0 ou 1 indéterminée)
+                            client_shap_values = shap_values[0][0]
+                            base_value = explainer.expected_value[0]
                     else:
+                        # Modèles avec sortie NumPy simple
                         client_shap_values = shap_values[0] 
                         if isinstance(explainer.expected_value, np.ndarray) or isinstance(explainer.expected_value, list):
                             base_value = explainer.expected_value[0]
@@ -277,11 +316,12 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
                     
                     global_shap_values = get_global_shap_values(explainer, X_ref_processed)
                     
+                    # --- NOUVELLE LOGIQUE SHAP GLOBALE (ROBUSTE) ---
                     if isinstance(global_shap_values, list):
-                        try:
-                            shap_sum = np.abs(global_shap_values[1]).mean(axis=0)
-                        except IndexError:
-                            shap_sum = np.abs(global_shap_values[0]).mean(axis=0)
+                        if len(global_shap_values) > 1:
+                            shap_sum = np.abs(global_shap_values[1]).mean(axis=0) # Risque de défaut (classe 1)
+                        else:
+                            shap_sum = np.abs(global_shap_values[0]).mean(axis=0) # Sortie unique
                     else:
                         shap_sum = np.abs(global_shap_values).mean(axis=0)
                     
@@ -302,7 +342,7 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
                     st.caption(f"Affiche les {num_features_to_display} variables qui ont, en moyenne, le plus grand impact sur la décision du modèle.")
 
             except Exception as e:
-                st.error(f"❌ Échec de l'Explication SHAP. Détail: {e}")
+                st.error(f"❌ Échec de l'Explication SHAP. Veuillez vérifier la configuration de votre modèle. Détail: {e}")
 
     # --- CONTENU DE L'ONGLET 2 : COMPARAISON ---
     with tab_comparison:
@@ -362,4 +402,4 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
             st.plotly_chart(fig_biv, use_container_width=True)
 
 else:
-    st.info("Sélectionnez un client et cliquez sur 'Calculer le Score' dans la barre latérale pour démarrer l'analyse.")
+    st.info("Sélectionnez un client et cliquez sur **'2. Calculer le Score (API)'** dans la barre latérale pour démarrer l'analyse.")
