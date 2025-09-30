@@ -11,6 +11,8 @@ import matplotlib.pyplot as plt
 from sklearn.pipeline import Pipeline
 from typing import Optional
 from scipy.sparse import issparse
+# Importation nécessaire pour inspecter la structure du pipeline
+from sklearn.compose import ColumnTransformer 
 
 # --- Configuration Globale ---
 API_URL = "https://scoring-api-latest.onrender.com/predict"
@@ -25,6 +27,7 @@ def load_data():
         df_data = pd.read_csv('client_sample_dashboard.csv') 
         client_ids = df_data['SK_ID_CURR'].unique().tolist()
         
+        # Le fichier de comparaison est conservé, car il ne concerne pas les noms SHAP
         with open('comparison_stats.json', 'r') as f:
             full_population_stats = json.load(f)
             
@@ -36,46 +39,101 @@ def load_data():
 
 @st.cache_resource
 def load_model_and_explainer():
+    
+    # --- FONCTION D'EXTRACTION MANUELLE DES NOMS DE FEATURES ---
+    # Si get_feature_names_out() échoue, on tente de reconstruire les noms.
+    def get_feature_names_manually(preprocessor_pipeline, raw_feature_names):
+        feature_names_processed = []
+        try:
+            # 1. Obtenir le ColumnTransformer (en supposant qu'il soit la seule étape)
+            # Sinon, il faut adapter le nom de l'étape : e.g., preprocessor_pipeline.named_steps['column_transformer_step']
+            if isinstance(preprocessor_pipeline, ColumnTransformer):
+                ct = preprocessor_pipeline
+            else:
+                # Tenter de trouver le ColumnTransformer dans le pipeline
+                ct = next(step[1] for step in preprocessor_pipeline.steps if isinstance(step[1], ColumnTransformer))
+
+            # 2. Parcourir les transformateurs
+            for name, transformer, features in ct.transformers_:
+                
+                # Le 'remainder' renvoie les noms bruts des colonnes non transformées
+                if name == 'remainder':
+                    # Dans les versions récentes, 'remainder' retourne 'passthrough' et on gère les colonnes restantes
+                    if transformer == 'passthrough':
+                        # Trouver les noms de colonnes non utilisées par d'autres transformateurs
+                        cols_used = set()
+                        for _, _, used_features in ct.transformers_:
+                            if isinstance(used_features, str):
+                                cols_used.add(used_features)
+                            elif isinstance(used_features, list):
+                                cols_used.update(used_features)
+                        
+                        remainder_cols = [col for col in raw_feature_names if col not in cols_used]
+                        feature_names_processed.extend(remainder_cols)
+                    else:
+                        # Si le remainder fait une transformation (rare), on gère ici si besoin
+                        pass 
+                
+                # Pour les transformateurs spécifiques (ex: num, cat)
+                elif transformer != 'drop':
+                    # Les transformateurs ayant 'get_feature_names_out' sont généralement les encodeurs (OneHot)
+                    if hasattr(transformer, 'get_feature_names_out'):
+                        # Utilisation de la méthode spécifique du transformateur (plus fiable que le CT)
+                        names_out = transformer.get_feature_names_out(features)
+                        # On applique votre nettoyage (retirer le préfixe)
+                        feature_names_processed.extend([n.split('__')[-1] for n in names_out])
+                    else:
+                        # Pour les Standard Scaler, Imputer, etc., les noms ne changent pas
+                        if isinstance(features, str):
+                             feature_names_processed.append(features)
+                        elif isinstance(features, list):
+                            feature_names_processed.extend(features)
+                        
+            st.sidebar.success("✅ Noms de features extraits manuellement!")
+            return feature_names_processed
+
+        except Exception as e:
+            st.sidebar.error(f"❌ Échec de l'extraction manuelle. Retour aux noms génériques. Détail: {e}")
+            # Retourne une liste de noms génériques si l'extraction échoue
+            return [f"Feature_{i}" for i in range(X_ref_processed.shape[1])]
+
     try:
         model_pipeline = joblib.load('modele_de_scoring.pkl')
+        # Chargement des données de référence (sans ID/cible)
         df_ref = pd.read_csv('client_sample_dashboard.csv').drop(columns=['SK_ID_CURR', 'TARGET'], errors='ignore')
 
         preprocessor_pipeline = Pipeline(model_pipeline.steps[:-1])
         final_classifier = model_pipeline.steps[-1][1]
         
+        # Transformation pour obtenir la dimension correcte
         X_ref_processed = preprocessor_pipeline.transform(df_ref)
         
-        # OBTENIR ET NETTOYER LES NOMS DE COLONNES POST-PRÉTRAITEMENT
-        try:
-            # 1. Obtenir les noms complets du pré-processeur
-            feature_names_full = preprocessor_pipeline.get_feature_names_out().tolist()
-            
-            # 2. Appliquer la logique de nettoyage de votre notebook
-            # Ceci retire le préfixe du transformateur (ex: 'onehotencoder__')
-            feature_names_processed = [name.split('__')[-1] for name in feature_names_full]
-            
-            # Vérification simple pour s'assurer que le nettoyage a eu lieu
-            if feature_names_processed[0].startswith('Feature_'):
-                 st.sidebar.warning("⚠️ Les noms de features sont génériques même après nettoyage. Vérifiez le pré-processeur.")
-
-        except (AttributeError, TypeError):
-            # Si get_feature_names_out échoue totalement
-            feature_names_processed = [f"Feature_{i}" for i in range(X_ref_processed.shape[1])]
-            st.sidebar.error("❌ get_feature_names_out() a échoué. Les noms seront génériques (Feature_X).")
-            
-        explainer = shap.TreeExplainer(final_classifier, X_ref_processed)
-        
-        # Noms des features brutes (pour la sidebar, etc.)
+        # Noms des features brutes (pour l'extraction manuelle)
         feature_names_raw = df_ref.columns.tolist() 
 
-        # On retourne X_ref_processed et les noms transformés (nettoyés)
+        # --- DÉTERMINATION DES NOMS DES FEATURES POST-TRAITEMENT ---
+        try:
+            # 1. Tenter la méthode standard de scikit-learn (si la version a été fixée)
+            feature_names_full = preprocessor_pipeline.get_feature_names_out().tolist()
+            feature_names_processed = [name.split('__')[-1] for name in feature_names_full]
+            st.sidebar.success("✅ Noms de features récupérés via get_feature_names_out()!")
+        except Exception:
+            # 2. Si échec (votre cas), utiliser la fonction d'extraction manuelle
+            feature_names_processed = get_feature_names_manually(preprocessor_pipeline, feature_names_raw)
+        
+        # ----------------------------------------------------------------------
+        
+        # Création de l'explainer après avoir défini feature_names_processed
+        explainer = shap.TreeExplainer(final_classifier, X_ref_processed)
+        
+        # On retourne X_ref_processed et les noms transformés (nettoyés ou par défaut)
         return model_pipeline, explainer, preprocessor_pipeline, X_ref_processed, feature_names_processed, feature_names_raw
         
     except Exception as e:
-        st.error(f"❌ Erreur critique lors du chargement ou initialisation SHAP. Détail: {e}")
+        st.error(f"❌ Erreur critique lors du chargement ou initialisation. Détail: {e}")
         return None, None, None, None, None, None
 
-# --- Fonction de Jauge Plotly (Aucun changement) ---
+# --- Fonction de Jauge Plotly (Aucun changement nécessaire) ---
 
 def create_gauge_chart(probability, threshold):
     
@@ -111,7 +169,7 @@ def create_gauge_chart(probability, threshold):
     return fig
 
 
-# --- Fonction d'Appel de l'API (Aucun changement) ---
+# --- Fonction d'Appel de l'API (Aucun changement nécessaire) ---
 def get_prediction_from_api(client_features):
     payload = {k: None if (pd.isna(v) or v == "") else v for k, v in client_features.items()}
     
@@ -128,7 +186,7 @@ df_data, client_ids, full_population_stats = load_data()
 model_pipeline, explainer, preprocessor_pipeline, X_ref_processed, feature_names_processed, feature_names_raw = load_model_and_explainer()
 
 # =============================================================================
-# MISE EN PAGE STREAMLIT (Légers ajustements dans SHAP)
+# MISE EN PAGE STREAMLIT
 # =============================================================================
 
 # --- En-tête (Centrage du Titre) ---
@@ -150,6 +208,7 @@ st.markdown(
 
 # Affichage du logo dans la barre latérale
 try:
+    # Utilisez 'logo_entreprise.png' si vous l'avez, sinon retirez cette ligne.
     st.sidebar.image(
         'logo_entreprise.png', 
         use_container_width=True
@@ -171,6 +230,7 @@ edited_data = {}
 
 # --- Bouton de Score Rapide ---
 if st.sidebar.button("Calculer le Score (API)", key="calculate_score_quick"):
+    # Envoie toutes les données brutes (sauf SK_ID_CURR et TARGET)
     data_to_send.update({k: v for k, v in client_data_raw.items() if k not in ['SK_ID_CURR', 'TARGET']})
     api_result = get_prediction_from_api(data_to_send)
     
@@ -202,6 +262,7 @@ with st.sidebar.form(key=f"form_{client_id}"):
             with col_label:
                  st.caption(f"{feature}")
 
+            # Tentative de conversion de type pour l'API
             try:
                 if input_val == "":
                     edited_data[feature] = np.nan
@@ -210,6 +271,7 @@ with st.sidebar.form(key=f"form_{client_id}"):
                 else:
                     edited_data[feature] = int(input_val)
             except ValueError:
+                # Si la conversion échoue (ex: texte dans un champ numérique), on garde la chaîne
                 edited_data[feature] = input_val
             
     submit_button_mod = st.form_submit_button(label="🔄 Recalculer le Score (Après Modification)")
@@ -225,6 +287,7 @@ if submit_button_mod:
         st.rerun()
         
 # --- Affichage Principal ---
+# Affiche la page principale uniquement si un score a été calculé et correspond au client actuel
 if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CURR'] == client_id:
     result = st.session_state['api_result']
     prob = result['probability']
@@ -287,7 +350,6 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
         
         with col_slider:
             if feature_names_processed is not None:
-                # Utiliser la longueur du tableau processed (feature_names_processed)
                 max_features_display = min(20, len(feature_names_processed)) 
                 num_features_to_display = st.slider(
                     "Nombre de variables à afficher :",
@@ -332,7 +394,7 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
                     else:
                         client_data = X_client_processed[0]
                         
-                    # CRÉATION DE L'OBJET EXPLANATION AVEC feature_names_processed
+                    # Utilisation des noms de features nettoyés/reconstruits
                     e = shap.Explanation(
                         client_shap_values, 
                         base_value, 
@@ -342,8 +404,6 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
                     
                     plt.rcParams.update({'figure.max_open_warning': 0})
                     
-                    # Ajustement de la taille de la figure pour éviter le zoom excessif (même correction que la dernière fois)
-                    # La hauteur est ajustée en fonction du nombre de features affichées
                     fig_height = max(5, num_features_to_display * 0.5) 
                     fig, ax = plt.subplots(figsize=(15, fig_height))
                     
@@ -359,7 +419,9 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
                     
                     @st.cache_data
                     def get_global_shap_values(_explainer, X_ref_processed):
-                        return _explainer.shap_values(X_ref_processed)
+                        sample_indices = np.random.choice(X_ref_processed.shape[0], size=min(500, X_ref_processed.shape[0]), replace=False)
+                        X_sample_for_global = X_ref_processed[sample_indices]
+                        return _explainer.shap_values(X_sample_for_global)
                     
                     global_shap_values = get_global_shap_values(explainer, X_ref_processed)
                     
@@ -370,17 +432,15 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
                     
                     
                     importance_df = pd.DataFrame({
-                        # Utilisation des noms de features nettoyés ici
                         'Feature': feature_names_processed, 
                         'Importance': shap_sum
                     }).sort_values(by='Importance', ascending=False).head(num_features_to_display)
 
-                    # Correction de la taille de la figure globale pour Plotly (optionnel mais recommandé)
                     fig = px.bar(importance_df, x='Importance', y='Feature', orientation='h', 
                                  title=f"Top {num_features_to_display} des Variables les Plus Importantes (Moyenne Absolue des Valeurs SHAP)",
                                  color='Importance',
                                  color_continuous_scale=px.colors.sequential.Blues) 
-                    fig.update_layout(yaxis={'categoryorder':'total ascending'}, height=max(500, num_features_to_display * 40)) # Ajustement de la hauteur
+                    fig.update_layout(yaxis={'categoryorder':'total ascending'}, height=max(500, num_features_to_display * 40))
                     
                     st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': True}) 
                     st.caption(f"Affiche les **{num_features_to_display} variables** qui ont, en moyenne, le plus grand impact sur la décision du modèle.")
@@ -390,7 +450,7 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
         else:
              st.warning("Impossible de générer les graphiques SHAP. Vérifiez que le modèle et les données de référence sont chargés correctement.")
 
-    # --- CONTENU DE L'ONGLET 2 : COMPARAISON (Aucun changement) ---
+    # --- CONTENU DE L'ONGLET 2 : COMPARAISON (Aucun changement nécessaire) ---
     with tab_comparison:
         st.subheader("Comparaison et Positionnement Client (Échantillon de Référence)")
         
