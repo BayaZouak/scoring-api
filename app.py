@@ -36,7 +36,8 @@ def load_data():
 
 @st.cache_resource
 def load_model_and_explainer():
-    """Charge le modèle et initialise l'explainer SHAP (pour l'explication locale et globale)."""
+    """Charge le modèle et initialise l'explainer SHAP (pour l'explication locale et globale).
+    Retourne les noms des caractéristiques après prétraitement pour une compatibilité SHAP robuste."""
     try:
         model_pipeline = joblib.load('modele_de_scoring.pkl')
         df_ref = pd.read_csv('client_sample_dashboard.csv').drop(columns=['SK_ID_CURR', 'TARGET'], errors='ignore')
@@ -46,20 +47,27 @@ def load_model_and_explainer():
         
         X_ref_processed = preprocessor_pipeline.transform(df_ref)
         
+        # OBTENIR LES NOMS DE COLONNES POST-PRÉTRAITEMENT
+        try:
+            # Tente d'obtenir les noms du pipeline (méthode standard)
+            feature_names_processed = preprocessor_pipeline.get_feature_names_out().tolist()
+        except AttributeError:
+            # Solution de repli
+            feature_names_processed = [f"Feature_{i}" for i in range(X_ref_processed.shape[1])]
+            
         explainer = shap.TreeExplainer(final_classifier, X_ref_processed)
         
-        return model_pipeline, explainer, preprocessor_pipeline, X_ref_processed
+        return model_pipeline, explainer, preprocessor_pipeline, X_ref_processed, feature_names_processed
         
     except Exception as e:
         st.error(f"❌ Erreur critique lors du chargement ou initialisation SHAP. Détail: {e}")
-        return None, None, None, None
+        return None, None, None, None, None
 
-# --- Fonction de Jauge Plotly (Meter Gauge) ---
+# --- Fonction de Jauge Plotly ---
 
 def create_gauge_chart(probability, threshold):
-    """Crée un graphique de jauge Plotly semi-circulaire (Meter Gauge) pour visualiser le risque."""
+    """Crée un graphique de jauge Plotly semi-circulaire (Meter Gauge)."""
     
-    # Inverser la probabilité pour un "score de confiance" (plus haut est mieux)
     confidence_score = (1 - probability) * 100
     confidence_threshold = (1 - threshold) * 100
     
@@ -76,14 +84,11 @@ def create_gauge_chart(probability, threshold):
             'bgcolor': "white",
             'borderwidth': 2,
             'bordercolor': "gray",
-            # Les étapes définissent les couleurs de fond de la jauge
             'steps': [
-                {'range': [0, confidence_threshold], 'color': "red"},    # Risque Élevé
-                {'range': [confidence_threshold, 100], 'color': "green"} # Risque Faible
+                {'range': [0, confidence_threshold], 'color': "red"},    
+                {'range': [confidence_threshold, 100], 'color': "green"} 
             ],
-            # Le curseur de la jauge est rendu plus visible par la barre
             'bar': {'color': 'black', 'thickness': 0.15}, 
-            # Le seuil est marqué par un triangle
             'threshold': {
                 'line': {'color': "black", 'width': 4},
                 'thickness': 0.75,
@@ -110,29 +115,35 @@ def get_prediction_from_api(client_features):
 
 # --- Chargement ---
 df_data, client_ids, full_population_stats = load_data() 
-model_pipeline, explainer, preprocessor_pipeline, X_ref_processed = load_model_and_explainer()
+model_pipeline, explainer, preprocessor_pipeline, X_ref_processed, feature_names_processed = load_model_and_explainer()
 
 # =============================================================================
 # MISE EN PAGE STREAMLIT
 # =============================================================================
 
-# --- En-tête avec Logo (NOUVEAUTÉ) ---
+# --- En-tête avec Logo et Titres  ---
 st.markdown("<style>.block-container {padding-top: 1rem;}</style>", unsafe_allow_html=True)
 
-col_logo, col_title = st.columns([1, 4])
+col_logo, col_title = st.columns([1.2, 4]) 
 with col_logo:
-    # AFFICHE LE LOGO DE L'ENTREPRISE (Assurez-vous que le fichier est présent)
     try:
-        st.image('logo_entreprise.png', width=100)
+        st.image(
+            'logo_entreprise.png', 
+            use_column_width=True, 
+            width=150 
+        ) 
     except FileNotFoundError:
-        st.warning("⚠️ Logo non trouvé. Ajoutez 'logo_entreprise.png' à la racine du projet.")
+        st.warning("⚠️ Logo non trouvé.")
         
 with col_title:
-    st.title("💳 Dashboard d'Analyse de Crédit")
-    st.markdown("Outil d'aide à la décision pour l'octroi de prêts.")
+   
+    st.title("Dashboard d'Analyse de Crédit") 
+    
+    # Centrage du sous-titre
+    st.markdown("<p align='center'>Outil d'aide à la décision pour l'octroi de prêts.</p>", unsafe_allow_html=True)
 
 
-# --- Barre Latérale (Améliorée) ---
+# --- Barre Latérale  ---
 st.sidebar.header("🔍 Sélection Client")
 
 client_id = st.sidebar.selectbox(
@@ -144,9 +155,9 @@ client_data_raw = df_data[df_data['SK_ID_CURR'] == client_id].iloc[0].to_dict()
 data_to_send = {'SK_ID_CURR': client_id}
 edited_data = {}
 
-# --- Bouton de Score Rapide (Monté en Haut) ---
+# --- Bouton de Score Rapide  ---
 if st.sidebar.button("2. Calculer le Score (API)", key="calculate_score_quick"):
-    # Si le bouton rapide est cliqué, nous envoyons les données brutes (non modifiées)
+    # Envoi des données brutes (non modifiées)
     data_to_send.update({k: v for k, v in client_data_raw.items() if k not in ['SK_ID_CURR', 'TARGET']})
     api_result = get_prediction_from_api(data_to_send)
     
@@ -156,7 +167,7 @@ if st.sidebar.button("2. Calculer le Score (API)", key="calculate_score_quick"):
         st.toast(f"Score pour le client {client_id} calculé!", icon='🚀')
         st.rerun()
 
-# --- Formulaire de Modification (Séparé) ---
+# --- Formulaire de Modification  ---
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 📝 3. Modification des Données (Optionnel)")
 
@@ -166,7 +177,6 @@ with st.sidebar.form(key=f"form_{client_id}"):
     for feature, value in client_data_raw.items():
         if feature not in ['SK_ID_CURR', 'TARGET']:
             
-            # Utilisation de la colonne pour condenser l'affichage
             col_label, col_input = st.columns([1.5, 2])
             with col_input:
                 input_val = st.text_input(
@@ -254,12 +264,13 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
             )
         
         with col_slider:
-            max_features = df_data.drop(columns=['SK_ID_CURR', 'TARGET'], errors='ignore').shape[1]
+            # Limiter le slider au nombre réel de features post-prétraitement
+            max_features_display = min(20, len(feature_names_processed))
             num_features_to_display = st.slider(
                 "Nombre de variables à afficher :",
                 min_value=5,
-                max_value=min(20, max_features),
-                value=10,
+                max_value=max_features_display,
+                value=min(10, max_features_display),
                 step=1,
                 key='num_feat'
             )
@@ -273,20 +284,20 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
                     df_client = pd.DataFrame([data_to_explain]).drop(columns=['SK_ID_CURR', 'TARGET'], errors='ignore')
                     X_client_processed = preprocessor_pipeline.transform(df_client) 
                     
-                    # --- NOUVELLE LOGIQUE SHAP LOCALE (ROBUSTE) ---
+                    # --- LOGIQUE SHAP LOCALE  ---
                     shap_values = explainer.shap_values(X_client_processed)
                     
                     if isinstance(shap_values, list):
-                        # Modèles multi-classes ou binaires avec deux sorties
                         if len(shap_values) > 1:
-                            client_shap_values = shap_values[1][0] # Risque de défaut (classe 1)
+                            # Cas binaire avec deux sorties (on prend la classe 1)
+                            client_shap_values = shap_values[1][0] 
                             base_value = explainer.expected_value[1]
                         else:
-                            # Modèle binaire avec une seule sortie (classe 0 ou 1 indéterminée)
+                            # Cas binaire avec une seule sortie 
                             client_shap_values = shap_values[0][0]
                             base_value = explainer.expected_value[0]
                     else:
-                        # Modèles avec sortie NumPy simple
+                        # Cas d'une sortie NumPy simple
                         client_shap_values = shap_values[0] 
                         if isinstance(explainer.expected_value, np.ndarray) or isinstance(explainer.expected_value, list):
                             base_value = explainer.expected_value[0]
@@ -296,7 +307,7 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
                     e = shap.Explanation(
                         client_shap_values, 
                         base_value, 
-                        feature_names=df_client.columns.tolist() 
+                        feature_names=feature_names_processed 
                     )
                     
                     plt.rcParams.update({'figure.max_open_warning': 0})
@@ -309,27 +320,25 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
                 elif explanation_type == 'Globale (Modèle)':
                     st.markdown("#### Explication Globale : Importance moyenne des variables pour le modèle")
                     
-                    # Correction Streamlit Cache pour explainer non hashable
                     @st.cache_data
                     def get_global_shap_values(_explainer, X_ref_processed):
                         return _explainer.shap_values(X_ref_processed)
                     
                     global_shap_values = get_global_shap_values(explainer, X_ref_processed)
                     
-                    # --- NOUVELLE LOGIQUE SHAP GLOBALE (ROBUSTE) ---
+                    # --- LOGIQUE SHAP GLOBALE  ---
                     if isinstance(global_shap_values, list):
                         if len(global_shap_values) > 1:
-                            shap_sum = np.abs(global_shap_values[1]).mean(axis=0) # Risque de défaut (classe 1)
+                            shap_sum = np.abs(global_shap_values[1]).mean(axis=0) 
                         else:
-                            shap_sum = np.abs(global_shap_values[0]).mean(axis=0) # Sortie unique
+                            shap_sum = np.abs(global_shap_values[0]).mean(axis=0) 
                     else:
                         shap_sum = np.abs(global_shap_values).mean(axis=0)
                     
                     
-                    feature_names = df_data.drop(columns=['SK_ID_CURR', 'TARGET'], errors='ignore').columns.tolist()
-                    
+                
                     importance_df = pd.DataFrame({
-                        'Feature': feature_names, 
+                        'Feature': feature_names_processed, 
                         'Importance': shap_sum
                     }).sort_values(by='Importance', ascending=False).head(num_features_to_display)
 
