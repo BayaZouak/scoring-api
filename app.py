@@ -166,11 +166,25 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
     # =============================================================================
     st.subheader("2. Explication des Facteurs de Décision")
     
-    explanation_type = st.radio(
-        "Type d'Analyse :",
-        ('Locale (Client)', 'Globale (Modèle)'),
-        horizontal=True
-    )
+    col_radio, col_slider = st.columns([2, 1])
+    
+    with col_radio:
+        explanation_type = st.radio(
+            "Type d'Analyse :",
+            ('Locale (Client)', 'Globale (Modèle)'),
+            horizontal=True
+        )
+    
+    with col_slider:
+        # Ajout du slider pour le nombre de variables
+        max_features = df_data.drop(columns=['SK_ID_CURR', 'TARGET'], errors='ignore').shape[1]
+        num_features_to_display = st.slider(
+            "Nombre de variables à afficher :",
+            min_value=5,
+            max_value=min(20, max_features),
+            value=10,
+            step=1
+        )
     
     if explainer and preprocessor_pipeline and X_ref_processed is not None:
         try:
@@ -183,21 +197,17 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
                 
                 X_client_processed = preprocessor_pipeline.transform(df_client) 
                 
-                # Calcul des valeurs SHAP
                 shap_values = explainer.shap_values(X_client_processed)
                 
-                # Correction d'index SHAP (gestion robuste de l'erreur list index out of range)
+                # Gestion de l'index SHAP
                 if isinstance(shap_values, list):
                     try:
-                        # Tenter d'accéder à la classe 1 (le risque de défaut)
                         client_shap_values = shap_values[1][0] 
                         base_value = explainer.expected_value[1]
                     except IndexError:
-                        # Si l'index 1 n'existe pas, prendre l'index 0 (la seule sortie disponible)
-                        client_shap_values = shap_values[0] # On enlève le double [0]
-                        base_value = explainer.expected_value # On suppose que la base est la valeur unique
+                        client_shap_values = shap_values[0] 
+                        base_value = explainer.expected_value
                 else:
-                    # Cas d'un tableau NumPy (sortie unique)
                     client_shap_values = shap_values[0] 
                     if isinstance(explainer.expected_value, np.ndarray) or isinstance(explainer.expected_value, list):
                         base_value = explainer.expected_value[0]
@@ -212,13 +222,13 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
                     feature_names=df_client.columns.tolist() 
                 )
                 
-                # Afficher le graphique Waterfall
+                # Afficher le graphique Waterfall avec le nombre de variables sélectionné
                 plt.rcParams.update({'figure.max_open_warning': 0})
                 fig, ax = plt.subplots(figsize=(12, 7)) 
-                shap.plots.waterfall(e, max_display=10, show=False)
+                shap.plots.waterfall(e, max_display=num_features_to_display, show=False)
                 st.pyplot(fig, use_container_width=True)
                 
-                st.caption("Le rouge pousse vers le défaut, le bleu diminue le risque. Affiche les 10 facteurs les plus importants pour ce client.")
+                st.caption(f"Le rouge pousse vers le défaut, le bleu diminue le risque. Affiche les {num_features_to_display} facteurs les plus importants pour ce client.")
 
             elif explanation_type == 'Globale (Modèle)':
                 st.markdown("#### Explication Globale : Importance moyenne des variables pour le modèle")
@@ -230,13 +240,11 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
                 
                 global_shap_values = get_global_shap_values(explainer, X_ref_processed)
                 
-                # Calculer la valeur absolue moyenne (gestion liste ou NumPy)
+                # Calculer la valeur absolue moyenne
                 if isinstance(global_shap_values, list):
                     try:
-                        # Tenter l'accès classique à la classe 1
                         shap_sum = np.abs(global_shap_values[1]).mean(axis=0)
                     except IndexError:
-                        # Si l'index 1 est hors limites, utiliser l'index 0
                         shap_sum = np.abs(global_shap_values[0]).mean(axis=0)
                 else:
                     shap_sum = np.abs(global_shap_values).mean(axis=0)
@@ -244,18 +252,19 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
                 
                 feature_names = df_data.drop(columns=['SK_ID_CURR', 'TARGET'], errors='ignore').columns.tolist()
                 
+                # Limite le DataFrame d'importance au nombre choisi par le slider
                 importance_df = pd.DataFrame({
                     'Feature': feature_names, 
                     'Importance': shap_sum
-                }).sort_values(by='Importance', ascending=False).head(20)
+                }).sort_values(by='Importance', ascending=False).head(num_features_to_display)
 
                 fig = px.bar(importance_df, x='Importance', y='Feature', orientation='h', 
-                             title="Top 20 des Variables les Plus Importantes (Moyenne Absolue des Valeurs SHAP)",
+                             title=f"Top {num_features_to_display} des Variables les Plus Importantes (Moyenne Absolue des Valeurs SHAP)",
                              color='Importance',
                              color_continuous_scale=px.colors.sequential.OrRd)
                 fig.update_layout(yaxis={'categoryorder':'total ascending'})
                 st.plotly_chart(fig, use_container_width=True)
-                st.caption("Affiche les 20 variables qui ont, en moyenne, le plus grand impact sur la décision du modèle.")
+                st.caption(f"Affiche les {num_features_to_display} variables qui ont, en moyenne, le plus grand impact sur la décision du modèle.")
 
         except Exception as e:
             st.error(f"❌ Échec de l'Explication SHAP. Détail: {e}")
@@ -272,7 +281,6 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
     with col_feat_1:
         st.markdown("#### Analyse Univariée (Distribution)")
         
-        # Filtre les features numériques pour la comparaison
         features_to_compare = [col for col in full_population_stats.keys() if full_population_stats[col]['type'] == 'num']
         selected_feature = st.selectbox(
             "Choisissez la caractéristique numérique à comparer :",
@@ -284,12 +292,10 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
 
         if pd.notna(client_val):
             
-            # Créer l'histogramme de la distribution de l'échantillon
             fig_dist = px.histogram(df_data, x=selected_feature, color='TARGET', 
                                     opacity=0.6, marginal="box", 
                                     title=f"Distribution de '{selected_feature}' dans l'Échantillon")
 
-            # Ajouter une ligne verticale pour le client actuel
             fig_dist.add_vline(x=client_val, line_width=3, line_dash="dash", line_color="red", 
                                annotation_text="Client Actuel", annotation_position="top right")
 
@@ -304,13 +310,11 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
     with col_feat_2:
         st.markdown("#### Analyse Bivariée (Positionnement)")
         
-        # Filtre les features numériques pour le scatter plot
         num_features = [col for col in df_data.columns if df_data[col].dtype in [np.float64, np.int64] and col not in ['SK_ID_CURR', 'TARGET']]
 
         feat_x = st.selectbox("Axe X :", num_features, index=0, key='feat_x')
         feat_y = st.selectbox("Axe Y :", num_features, index=1, key='feat_y')
         
-        # Scatter plot avec mise en évidence du client
         fig_biv = px.scatter(df_data, x=feat_x, y=feat_y, color='TARGET', 
                               title=f"Relation entre {feat_x} et {feat_y} (Échantillon)",
                               color_continuous_scale=px.colors.sequential.Sunset,
