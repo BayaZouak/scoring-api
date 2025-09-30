@@ -127,7 +127,7 @@ if submit_button:
         st.session_state['api_result'] = api_result
         st.session_state['current_client_data'] = data_to_send
         st.toast(f"Score pour le client {client_id} mis à jour!", icon='🚀')
-        st.experimental_rerun()
+        st.rerun()
         
         
 # --- Affichage Principal ---
