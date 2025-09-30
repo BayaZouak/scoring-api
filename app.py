@@ -45,26 +45,37 @@ def load_model_and_explainer():
         
         X_ref_processed = preprocessor_pipeline.transform(df_ref)
         
-        # OBTENIR LES NOMS DE COLONNES POST-PRÉTRAITEMENT 
+        # OBTENIR ET NETTOYER LES NOMS DE COLONNES POST-PRÉTRAITEMENT
         try:
-            feature_names_processed = preprocessor_pipeline.get_feature_names_out().tolist()
+            # 1. Obtenir les noms complets du pré-processeur
+            feature_names_full = preprocessor_pipeline.get_feature_names_out().tolist()
+            
+            # 2. Appliquer la logique de nettoyage de votre notebook
+            # Ceci retire le préfixe du transformateur (ex: 'onehotencoder__')
+            feature_names_processed = [name.split('__')[-1] for name in feature_names_full]
+            
+            # Vérification simple pour s'assurer que le nettoyage a eu lieu
+            if feature_names_processed[0].startswith('Feature_'):
+                 st.sidebar.warning("⚠️ Les noms de features sont génériques même après nettoyage. Vérifiez le pré-processeur.")
+
         except (AttributeError, TypeError):
-            # Si get_feature_names_out échoue, on utilise des noms génériques, mais on continue
+            # Si get_feature_names_out échoue totalement
             feature_names_processed = [f"Feature_{i}" for i in range(X_ref_processed.shape[1])]
+            st.sidebar.error("❌ get_feature_names_out() a échoué. Les noms seront génériques (Feature_X).")
             
         explainer = shap.TreeExplainer(final_classifier, X_ref_processed)
         
-        # Noms des features brutes (pour SHAP local si le preprocessing ne donne pas de noms lisibles)
+        # Noms des features brutes (pour la sidebar, etc.)
         feature_names_raw = df_ref.columns.tolist() 
 
-        # On retourne X_ref_processed et les noms transformés et bruts
+        # On retourne X_ref_processed et les noms transformés (nettoyés)
         return model_pipeline, explainer, preprocessor_pipeline, X_ref_processed, feature_names_processed, feature_names_raw
         
     except Exception as e:
         st.error(f"❌ Erreur critique lors du chargement ou initialisation SHAP. Détail: {e}")
         return None, None, None, None, None, None
 
-# --- Fonction de Jauge Plotly ---
+# --- Fonction de Jauge Plotly (Aucun changement) ---
 
 def create_gauge_chart(probability, threshold):
     
@@ -100,7 +111,7 @@ def create_gauge_chart(probability, threshold):
     return fig
 
 
-# --- Fonction d'Appel de l'API ---
+# --- Fonction d'Appel de l'API (Aucun changement) ---
 def get_prediction_from_api(client_features):
     payload = {k: None if (pd.isna(v) or v == "") else v for k, v in client_features.items()}
     
@@ -117,7 +128,7 @@ df_data, client_ids, full_population_stats = load_data()
 model_pipeline, explainer, preprocessor_pipeline, X_ref_processed, feature_names_processed, feature_names_raw = load_model_and_explainer()
 
 # =============================================================================
-# MISE EN PAGE STREAMLIT
+# MISE EN PAGE STREAMLIT (Légers ajustements dans SHAP)
 # =============================================================================
 
 # --- En-tête (Centrage du Titre) ---
@@ -276,7 +287,8 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
         
         with col_slider:
             if feature_names_processed is not None:
-                max_features_display = min(20, len(feature_names_raw)) # Utiliser la longueur de la liste RAW si c'est plus clair
+                # Utiliser la longueur du tableau processed (feature_names_processed)
+                max_features_display = min(20, len(feature_names_processed)) 
                 num_features_to_display = st.slider(
                     "Nombre de variables à afficher :",
                     min_value=5,
@@ -320,10 +332,7 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
                     else:
                         client_data = X_client_processed[0]
                         
-                    # CRÉATION DE L'OBJET EXPLANATION (utilise les noms post-traitement)
-                    # Note : Si les noms post-traitement sont illisibles, ceci affichera les noms illisibles.
-                    # Pour utiliser les noms bruts, il faudrait s'assurer que l'alignement est correct, ce qui est très risqué.
-                    # Nous utilisons donc feature_names_processed
+                    # CRÉATION DE L'OBJET EXPLANATION AVEC feature_names_processed
                     e = shap.Explanation(
                         client_shap_values, 
                         base_value, 
@@ -333,8 +342,9 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
                     
                     plt.rcParams.update({'figure.max_open_warning': 0})
                     
-                    # Augmente la taille de la figure pour le waterfall (pour dézoomer)
-                    fig_height = max(5, num_features_to_display * 0.7) 
+                    # Ajustement de la taille de la figure pour éviter le zoom excessif (même correction que la dernière fois)
+                    # La hauteur est ajustée en fonction du nombre de features affichées
+                    fig_height = max(5, num_features_to_display * 0.5) 
                     fig, ax = plt.subplots(figsize=(15, fig_height))
                     
                     shap.plots.waterfall(e, max_display=num_features_to_display, show=False)
@@ -347,7 +357,6 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
                 elif explanation_type == 'Globale (Modèle)':
                     st.markdown("#### Explication Globale : Importance moyenne des variables pour le modèle")
                     
-                    # Utiliser l'objet explainer directement avec X_ref_processed (déjà en cache)
                     @st.cache_data
                     def get_global_shap_values(_explainer, X_ref_processed):
                         return _explainer.shap_values(X_ref_processed)
@@ -359,17 +368,19 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
                     else:
                         shap_sum = np.abs(global_shap_values).mean(axis=0)
                     
-                    # Utilisation des noms post-traitement (feature_names_processed)
+                    
                     importance_df = pd.DataFrame({
+                        # Utilisation des noms de features nettoyés ici
                         'Feature': feature_names_processed, 
                         'Importance': shap_sum
                     }).sort_values(by='Importance', ascending=False).head(num_features_to_display)
 
+                    # Correction de la taille de la figure globale pour Plotly (optionnel mais recommandé)
                     fig = px.bar(importance_df, x='Importance', y='Feature', orientation='h', 
                                  title=f"Top {num_features_to_display} des Variables les Plus Importantes (Moyenne Absolue des Valeurs SHAP)",
                                  color='Importance',
                                  color_continuous_scale=px.colors.sequential.Blues) 
-                    fig.update_layout(yaxis={'categoryorder':'total ascending'})
+                    fig.update_layout(yaxis={'categoryorder':'total ascending'}, height=max(500, num_features_to_display * 40)) # Ajustement de la hauteur
                     
                     st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': True}) 
                     st.caption(f"Affiche les **{num_features_to_display} variables** qui ont, en moyenne, le plus grand impact sur la décision du modèle.")
@@ -379,7 +390,7 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
         else:
              st.warning("Impossible de générer les graphiques SHAP. Vérifiez que le modèle et les données de référence sont chargés correctement.")
 
-    # --- CONTENU DE L'ONGLET 2 : COMPARAISON ---
+    # --- CONTENU DE L'ONGLET 2 : COMPARAISON (Aucun changement) ---
     with tab_comparison:
         st.subheader("Comparaison et Positionnement Client (Échantillon de Référence)")
         
