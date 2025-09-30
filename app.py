@@ -36,8 +36,7 @@ def load_data():
 
 @st.cache_resource
 def load_model_and_explainer():
-    """Charge le modèle et initialise l'explainer SHAP (pour l'explication locale et globale).
-    Retourne les noms des caractéristiques après prétraitement pour une compatibilité SHAP robuste."""
+    """Charge le modèle et initialise l'explainer SHAP (pour l'explication locale et globale)."""
     try:
         model_pipeline = joblib.load('modele_de_scoring.pkl')
         df_ref = pd.read_csv('client_sample_dashboard.csv').drop(columns=['SK_ID_CURR', 'TARGET'], errors='ignore')
@@ -94,8 +93,8 @@ def create_gauge_chart(probability, threshold):
             }}
     ))
     
-    # Activation du mode interactif pour la jauge
-    fig.update_layout(height=400, margin=dict(l=10, r=10, t=50, b=10), modebar_active=True)
+    # CORRECTION ICI: Suppression de modebar_active=True de update_layout
+    fig.update_layout(height=400, margin=dict(l=10, r=10, t=50, b=10)) 
     return fig
 
 
@@ -139,7 +138,7 @@ with col_title:
     st.markdown("<p align='center'>Outil d'aide à la décision pour l'octroi de prêts.</p>", unsafe_allow_html=True)
 
 
-# --- Barre Latérale ---
+# --- Barre Latérale (Ergonomie Améliorée) ---
 st.sidebar.header("🔍 Sélection Client")
 
 client_id = st.sidebar.selectbox(
@@ -151,7 +150,7 @@ client_data_raw = df_data[df_data['SK_ID_CURR'] == client_id].iloc[0].to_dict()
 data_to_send = {'SK_ID_CURR': client_id}
 edited_data = {}
 
-# --- Bouton de Score Rapide  ---
+# --- Bouton de Score Rapide (Monté en Haut) ---
 if st.sidebar.button("2. Calculer le Score (API)", key="calculate_score_quick"):
     data_to_send.update({k: v for k, v in client_data_raw.items() if k not in ['SK_ID_CURR', 'TARGET']})
     api_result = get_prediction_from_api(data_to_send)
@@ -162,7 +161,7 @@ if st.sidebar.button("2. Calculer le Score (API)", key="calculate_score_quick"):
         st.toast(f"Score pour le client {client_id} calculé!", icon='🚀')
         st.rerun()
 
-# --- Formulaire de Modification ---
+# --- Formulaire de Modification (Séparé) ---
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 📝 3. Modification des Données (Optionnel)")
 
@@ -231,7 +230,8 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
         
     with col_jauge:
         gauge_fig = create_gauge_chart(prob, BEST_THRESHOLD)
-        st.plotly_chart(gauge_fig, use_container_width=True, config={'displayModeBar': True}) # Ajout du modebar
+        # Activation du modebar pour la jauge
+        st.plotly_chart(gauge_fig, use_container_width=True, config={'displayModeBar': True}) 
         
     with col_decision:
         color = "red" if decision == 1 else "green"
@@ -242,12 +242,10 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
     st.markdown("---")
     st.subheader("Détails des Variables du Client")
     
-    # Préparation des données pour l'affichage
     df_details = pd.Series(
         {k: v for k, v in current_data.items() if k not in ['SK_ID_CURR', 'TARGET']}
     ).rename('Valeur Client').to_frame()
     
-    # Affichage compact et défilable (hauteur max 300px)
     with st.expander("Cliquez pour voir toutes les variables et leurs valeurs", expanded=False):
         st.dataframe(df_details, height=300, use_container_width=True)
     
@@ -291,7 +289,7 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
                     df_client = pd.DataFrame([data_to_explain]).drop(columns=['SK_ID_CURR', 'TARGET'], errors='ignore')
                     X_client_processed = preprocessor_pipeline.transform(df_client) 
                     
-                    # Logique SHAP 
+                    # Logique SHAP (Correction)
                     shap_values = explainer.shap_values(X_client_processed)
                     
                     if isinstance(shap_values, list):
@@ -327,13 +325,13 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
                     
                     global_shap_values = get_global_shap_values(explainer, X_ref_processed)
                     
-                    # Logique SHAP 
+                    # Logique SHAP (Correction)
                     if isinstance(global_shap_values, list):
                         shap_sum = np.abs(global_shap_values[1]).mean(axis=0) if len(global_shap_values) > 1 else np.abs(global_shap_values[0]).mean(axis=0) 
                     else:
                         shap_sum = np.abs(global_shap_values).mean(axis=0)
                     
-                    #  couleurs pour les nuances de bleu
+                    
                     importance_df = pd.DataFrame({
                         'Feature': feature_names_processed, 
                         'Importance': shap_sum
@@ -342,10 +340,10 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
                     fig = px.bar(importance_df, x='Importance', y='Feature', orientation='h', 
                                  title=f"Top {num_features_to_display} des Variables les Plus Importantes (Moyenne Absolue des Valeurs SHAP)",
                                  color='Importance',
-                                 color_continuous_scale=px.colors.sequential.Blues) 
+                                 color_continuous_scale=px.colors.sequential.Blues) # COULEUR BLEUE
                     fig.update_layout(yaxis={'categoryorder':'total ascending'})
                     
-                    # modebar interactif
+                    # Ajout du modebar interactif
                     st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': True}) 
                     st.caption(f"Affiche les {num_features_to_display} variables qui ont, en moyenne, le plus grand impact sur la décision du modèle.")
 
@@ -379,7 +377,7 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
                 fig_dist.add_vline(x=client_val, line_width=3, line_dash="dash", line_color="red", 
                                    annotation_text="Client Actuel", annotation_position="top right")
 
-                # modebar interactif
+                # Ajout du modebar interactif
                 st.plotly_chart(fig_dist, use_container_width=True, config={'displayModeBar': True})
                 
                 st.metric(label="Valeur Client Actuelle", value=f"{client_val:,.2f}")
@@ -408,7 +406,7 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
                 fig_biv.add_scatter(x=[client_x], y=[client_y], mode='markers', name='Client Actuel', 
                                      marker=dict(color='red', size=15, symbol='star', line=dict(width=2, color='DarkRed')))
 
-            # modebar interactif
+            # Ajout du modebar interactif
             st.plotly_chart(fig_biv, use_container_width=True, config={'displayModeBar': True})
 
 else:
