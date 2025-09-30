@@ -47,12 +47,10 @@ def load_model_and_explainer():
         
         X_ref_processed = preprocessor_pipeline.transform(df_ref)
         
-        # OBTENIR LES NOMS DE COLONNES POST-PRÉTRAITEMENT
+        # OBTENIR LES NOMS DE COLONNES POST-PRÉTRAITEMENT (Crucial pour SHAP)
         try:
-            # Tente d'obtenir les noms du pipeline (méthode standard)
             feature_names_processed = preprocessor_pipeline.get_feature_names_out().tolist()
         except AttributeError:
-            # Solution de repli
             feature_names_processed = [f"Feature_{i}" for i in range(X_ref_processed.shape[1])]
             
         explainer = shap.TreeExplainer(final_classifier, X_ref_processed)
@@ -69,7 +67,7 @@ def create_gauge_chart(probability, threshold):
     """Crée un graphique de jauge Plotly semi-circulaire (Meter Gauge)."""
     
     confidence_score = (1 - probability) * 100
-    confidence_threshold = (1 - threshold) * 100
+    confidence_threshold = (1 - threshold) * 100 
     
     fig = go.Figure(go.Indicator(
         mode = "gauge+number",
@@ -96,7 +94,8 @@ def create_gauge_chart(probability, threshold):
             }}
     ))
     
-    fig.update_layout(height=400, margin=dict(l=10, r=10, t=50, b=10))
+    # Activation du mode interactif pour la jauge
+    fig.update_layout(height=400, margin=dict(l=10, r=10, t=50, b=10), modebar_active=True)
     return fig
 
 
@@ -121,7 +120,7 @@ model_pipeline, explainer, preprocessor_pipeline, X_ref_processed, feature_names
 # MISE EN PAGE STREAMLIT
 # =============================================================================
 
-# --- En-tête avec Logo et Titres  ---
+# --- En-tête avec Logo et Titres ---
 st.markdown("<style>.block-container {padding-top: 1rem;}</style>", unsafe_allow_html=True)
 
 col_logo, col_title = st.columns([1.2, 4]) 
@@ -136,14 +135,11 @@ with col_logo:
         st.warning("⚠️ Logo non trouvé.")
         
 with col_title:
-   
     st.title("Dashboard d'Analyse de Crédit") 
-    
-    # Centrage du sous-titre
     st.markdown("<p align='center'>Outil d'aide à la décision pour l'octroi de prêts.</p>", unsafe_allow_html=True)
 
 
-# --- Barre Latérale  ---
+# --- Barre Latérale ---
 st.sidebar.header("🔍 Sélection Client")
 
 client_id = st.sidebar.selectbox(
@@ -157,7 +153,6 @@ edited_data = {}
 
 # --- Bouton de Score Rapide  ---
 if st.sidebar.button("2. Calculer le Score (API)", key="calculate_score_quick"):
-    # Envoi des données brutes (non modifiées)
     data_to_send.update({k: v for k, v in client_data_raw.items() if k not in ['SK_ID_CURR', 'TARGET']})
     api_result = get_prediction_from_api(data_to_send)
     
@@ -167,7 +162,7 @@ if st.sidebar.button("2. Calculer le Score (API)", key="calculate_score_quick"):
         st.toast(f"Score pour le client {client_id} calculé!", icon='🚀')
         st.rerun()
 
-# --- Formulaire de Modification  ---
+# --- Formulaire de Modification ---
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 📝 3. Modification des Données (Optionnel)")
 
@@ -236,13 +231,26 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
         
     with col_jauge:
         gauge_fig = create_gauge_chart(prob, BEST_THRESHOLD)
-        st.plotly_chart(gauge_fig, use_container_width=True)
-
+        st.plotly_chart(gauge_fig, use_container_width=True, config={'displayModeBar': True}) # Ajout du modebar
+        
     with col_decision:
         color = "red" if decision == 1 else "green"
         st.markdown(f"**Décision Finale :** <span style='color:{color}; font-size: 1.5em;'>{message}</span>", unsafe_allow_html=True)
         st.markdown(f"**Score de Confiance :** <span style='font-size: 1.5em;'>{(1-prob)*100:.2f}%</span>", unsafe_allow_html=True)
 
+    # --- DÉTAILS DU CLIENT DÉFILABLES ---
+    st.markdown("---")
+    st.subheader("Détails des Variables du Client")
+    
+    # Préparation des données pour l'affichage
+    df_details = pd.Series(
+        {k: v for k, v in current_data.items() if k not in ['SK_ID_CURR', 'TARGET']}
+    ).rename('Valeur Client').to_frame()
+    
+    # Affichage compact et défilable (hauteur max 300px)
+    with st.expander("Cliquez pour voir toutes les variables et leurs valeurs", expanded=False):
+        st.dataframe(df_details, height=300, use_container_width=True)
+    
     st.markdown("---")
 
     # =============================================================================
@@ -264,7 +272,6 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
             )
         
         with col_slider:
-            # Limiter le slider au nombre réel de features post-prétraitement
             max_features_display = min(20, len(feature_names_processed))
             num_features_to_display = st.slider(
                 "Nombre de variables à afficher :",
@@ -284,25 +291,19 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
                     df_client = pd.DataFrame([data_to_explain]).drop(columns=['SK_ID_CURR', 'TARGET'], errors='ignore')
                     X_client_processed = preprocessor_pipeline.transform(df_client) 
                     
-                    # --- LOGIQUE SHAP LOCALE  ---
+                    # Logique SHAP 
                     shap_values = explainer.shap_values(X_client_processed)
                     
                     if isinstance(shap_values, list):
                         if len(shap_values) > 1:
-                            # Cas binaire avec deux sorties (on prend la classe 1)
                             client_shap_values = shap_values[1][0] 
                             base_value = explainer.expected_value[1]
                         else:
-                            # Cas binaire avec une seule sortie 
                             client_shap_values = shap_values[0][0]
                             base_value = explainer.expected_value[0]
                     else:
-                        # Cas d'une sortie NumPy simple
                         client_shap_values = shap_values[0] 
-                        if isinstance(explainer.expected_value, np.ndarray) or isinstance(explainer.expected_value, list):
-                            base_value = explainer.expected_value[0]
-                        else:
-                            base_value = explainer.expected_value
+                        base_value = explainer.expected_value if not isinstance(explainer.expected_value, (np.ndarray, list)) else explainer.expected_value[0]
 
                     e = shap.Explanation(
                         client_shap_values, 
@@ -326,17 +327,13 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
                     
                     global_shap_values = get_global_shap_values(explainer, X_ref_processed)
                     
-                    # --- LOGIQUE SHAP GLOBALE  ---
+                    # Logique SHAP 
                     if isinstance(global_shap_values, list):
-                        if len(global_shap_values) > 1:
-                            shap_sum = np.abs(global_shap_values[1]).mean(axis=0) 
-                        else:
-                            shap_sum = np.abs(global_shap_values[0]).mean(axis=0) 
+                        shap_sum = np.abs(global_shap_values[1]).mean(axis=0) if len(global_shap_values) > 1 else np.abs(global_shap_values[0]).mean(axis=0) 
                     else:
                         shap_sum = np.abs(global_shap_values).mean(axis=0)
                     
-                    
-                
+                    #  couleurs pour les nuances de bleu
                     importance_df = pd.DataFrame({
                         'Feature': feature_names_processed, 
                         'Importance': shap_sum
@@ -345,9 +342,11 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
                     fig = px.bar(importance_df, x='Importance', y='Feature', orientation='h', 
                                  title=f"Top {num_features_to_display} des Variables les Plus Importantes (Moyenne Absolue des Valeurs SHAP)",
                                  color='Importance',
-                                 color_continuous_scale=px.colors.sequential.OrRd)
+                                 color_continuous_scale=px.colors.sequential.Blues) 
                     fig.update_layout(yaxis={'categoryorder':'total ascending'})
-                    st.plotly_chart(fig, use_container_width=True)
+                    
+                    # modebar interactif
+                    st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': True}) 
                     st.caption(f"Affiche les {num_features_to_display} variables qui ont, en moyenne, le plus grand impact sur la décision du modèle.")
 
             except Exception as e:
@@ -380,7 +379,8 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
                 fig_dist.add_vline(x=client_val, line_width=3, line_dash="dash", line_color="red", 
                                    annotation_text="Client Actuel", annotation_position="top right")
 
-                st.plotly_chart(fig_dist, use_container_width=True)
+                # modebar interactif
+                st.plotly_chart(fig_dist, use_container_width=True, config={'displayModeBar': True})
                 
                 st.metric(label="Valeur Client Actuelle", value=f"{client_val:,.2f}")
                 
@@ -408,7 +408,8 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
                 fig_biv.add_scatter(x=[client_x], y=[client_y], mode='markers', name='Client Actuel', 
                                      marker=dict(color='red', size=15, symbol='star', line=dict(width=2, color='DarkRed')))
 
-            st.plotly_chart(fig_biv, use_container_width=True)
+            # modebar interactif
+            st.plotly_chart(fig_biv, use_container_width=True, config={'displayModeBar': True})
 
 else:
     st.info("Sélectionnez un client et cliquez sur **'2. Calculer le Score (API)'** dans la barre latérale pour démarrer l'analyse.")
