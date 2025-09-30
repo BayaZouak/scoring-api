@@ -21,11 +21,9 @@ st.set_page_config(layout="wide", page_title="Dashboard Scoring Crédit")
 def load_data():
     """Charge l'échantillon client et les statistiques de la population."""
     try:
-        # NOTE: client_sample_dashboard.csv est désormais considéré comme le jeu de données de référence COMPLET
         df_data = pd.read_csv('client_sample_dashboard.csv') 
         client_ids = df_data['SK_ID_CURR'].unique().tolist()
         
-        # Le fichier de statistiques reste utile, mais on pourrait aussi le calculer directement à partir de df_data
         with open('comparison_stats.json', 'r') as f:
             full_population_stats = json.load(f)
             
@@ -47,8 +45,9 @@ def load_model_and_explainer():
         
         X_ref_processed = preprocessor_pipeline.transform(df_ref)
         
-        # On calcule les valeurs SHAP pour le background (utilisation pour l'explication GLOBALE)
         explainer = shap.TreeExplainer(final_classifier, X_ref_processed)
+        
+        # Le message de succès est retiré de la page principale comme demandé
         return model_pipeline, explainer, preprocessor_pipeline, X_ref_processed
         
     except Exception as e:
@@ -89,7 +88,6 @@ client_id = st.sidebar.selectbox(
     client_ids
 )
 
-# Chargement des données brutes du client sélectionné
 client_data_raw = df_data[df_data['SK_ID_CURR'] == client_id].iloc[0].to_dict()
 data_to_send = {'SK_ID_CURR': client_id}
 edited_data = {}
@@ -123,7 +121,7 @@ if submit_button:
         st.session_state['api_result'] = api_result
         st.session_state['current_client_data'] = data_to_send
         st.toast(f"Score pour le client {client_id} mis à jour!", icon='🚀')
-        st.rerun() # Correction du st.experimental_rerun()
+        st.rerun()
         
         
 # --- Affichage Principal ---
@@ -185,15 +183,27 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
                 df_client = pd.DataFrame([data_to_explain]).drop(columns=['SK_ID_CURR', 'TARGET'], errors='ignore')
                 
                 X_client_processed = preprocessor_pipeline.transform(df_client) 
+                
+                # Calcul des valeurs SHAP
                 shap_values = explainer.shap_values(X_client_processed)
                 
-                # Index SHAP (gestion 2D ou 3D)
+                # Correction d'index SHAP (gestion robuste de l'erreur list index out of range)
                 if isinstance(shap_values, list):
-                    client_shap_values = shap_values[1][0] 
-                    base_value = explainer.expected_value[1]
+                    try:
+                        # Tenter d'accéder à la classe 1 (le risque de défaut)
+                        client_shap_values = shap_values[1][0] 
+                        base_value = explainer.expected_value[1]
+                    except IndexError:
+                        # Si l'index 1 n'existe pas, prendre l'index 0 (la seule sortie disponible)
+                        client_shap_values = shap_values[0][0]
+                        base_value = explainer.expected_value[0]
                 else:
+                    # Cas d'un tableau NumPy (sortie unique)
                     client_shap_values = shap_values[0] 
-                    base_value = explainer.expected_value if not isinstance(explainer.expected_value, np.ndarray) else explainer.expected_value[0]
+                    if isinstance(explainer.expected_value, np.ndarray) or isinstance(explainer.expected_value, list):
+                        base_value = explainer.expected_value[0]
+                    else:
+                        base_value = explainer.expected_value
 
 
                 # Créer l'objet Explanation 
@@ -214,20 +224,16 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
             elif explanation_type == 'Globale (Modèle)':
                 st.markdown("#### Explication Globale : Importance moyenne des variables pour le modèle")
                 
-                # --- Logique SHAP Globale (Importance Moyenne) ---
-                
                 @st.cache_data
                 def get_global_shap_values(explainer, X_ref_processed):
                     return explainer.shap_values(X_ref_processed)
                 
                 global_shap_values = get_global_shap_values(explainer, X_ref_processed)
                 
-                # Prendre la valeur absolue moyenne de la classe 1 (défaut)
+                # Calculer la valeur absolue moyenne (gestion liste ou NumPy)
                 if isinstance(global_shap_values, list):
-                    # Cas binaire
                     shap_sum = np.abs(global_shap_values[1]).mean(axis=0)
                 else:
-                    # Cas unique output (régression ou sortie unique)
                     shap_sum = np.abs(global_shap_values).mean(axis=0)
                 
                 
@@ -236,7 +242,7 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
                 importance_df = pd.DataFrame({
                     'Feature': feature_names, 
                     'Importance': shap_sum
-                }).sort_values(by='Importance', ascending=False).head(20) # Top 20
+                }).sort_values(by='Importance', ascending=False).head(20)
 
                 fig = px.bar(importance_df, x='Importance', y='Feature', orientation='h', 
                              title="Top 20 des Variables les Plus Importantes (Moyenne Absolue des Valeurs SHAP)",
@@ -261,6 +267,7 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
     with col_feat_1:
         st.markdown("#### Analyse Univariée (Distribution)")
         
+        # Filtre les features numériques pour la comparaison
         features_to_compare = [col for col in full_population_stats.keys() if full_population_stats[col]['type'] == 'num']
         selected_feature = st.selectbox(
             "Choisissez la caractéristique numérique à comparer :",
@@ -268,7 +275,6 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
             key='feature_uni'
         )
         
-        # --- Graphique Univarié (Box Plot ou Histogramme) ---
         client_val = current_data.get(selected_feature)
 
         if pd.notna(client_val):
@@ -293,19 +299,18 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
     with col_feat_2:
         st.markdown("#### Analyse Bivariée (Positionnement)")
         
-        # Filtrer uniquement les features numériques pour le scatter plot
+        # Filtre les features numériques pour le scatter plot
         num_features = [col for col in df_data.columns if df_data[col].dtype in [np.float64, np.int64] and col not in ['SK_ID_CURR', 'TARGET']]
 
         feat_x = st.selectbox("Axe X :", num_features, index=0, key='feat_x')
         feat_y = st.selectbox("Axe Y :", num_features, index=1, key='feat_y')
         
-        # Utilise l'échantillon léger df_data pour le scatter plot
+        # Scatter plot avec mise en évidence du client
         fig_biv = px.scatter(df_data, x=feat_x, y=feat_y, color='TARGET', 
                               title=f"Relation entre {feat_x} et {feat_y} (Échantillon)",
                               color_continuous_scale=px.colors.sequential.Sunset,
                               hover_data=['SK_ID_CURR'])
         
-        # Mettre en évidence le client sélectionné
         client_x = current_data.get(feat_x)
         client_y = current_data.get(feat_y)
         
