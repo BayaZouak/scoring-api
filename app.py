@@ -27,8 +27,28 @@ def load_data():
         df_data = pd.read_csv('client_sample_dashboard.csv') 
         client_ids = df_data['SK_ID_CURR'].unique().tolist()
 
-        with open('comparison_stats.json', 'r') as f:
-            full_population_stats = json.load(f)
+        # ---Calculer les stats de l'échantillon ---
+        sample_population_stats = {}
+        
+        # Colonnes à ignorer dans l'analyse de type (ID et Cible)
+        cols_to_ignore = ['SK_ID_CURR', 'TARGET'] 
+        
+        for col in df_data.columns:
+            if col in cols_to_ignore:
+                continue
+            
+            dtype = df_data[col].dtype
+            
+            # Détermination simplifiée du type :
+            # Si c'est numérique ET qu'il y a plus de 10 valeurs uniques -> Numérique
+            if pd.api.types.is_numeric_dtype(dtype) and df_data[col].nunique() > 10:
+                sample_population_stats[col] = {'type': 'num'}
+            # Sinon (chaîne de caractères ou moins de 10 valeurs uniques) -> Catégoriel
+            elif pd.api.types.is_object_dtype(dtype) or df_data[col].nunique() <= 10:
+                sample_population_stats[col] = {'type': 'cat'}
+            
+        full_population_stats = sample_population_stats
+        # --------------------------------------------------------------------------
             
         return df_data, client_ids, full_population_stats
         
@@ -80,14 +100,14 @@ def load_model_and_explainer():
                     else:
                         # Pour les Standard Scaler, Imputer, etc., les noms ne changent pas
                         if isinstance(features, str):
-                             feature_names_processed.append(features)
+                            feature_names_processed.append(features)
                         elif isinstance(features, list):
                             feature_names_processed.extend(features)
                         
             return feature_names_processed
 
         except Exception as e:
-            st.sidebar.error(f"❌ Échec de l'extraction manuelle. Retour aux noms génériques. Détail: {e}")
+            # st.sidebar.error(f"❌ Échec de l'extraction manuelle. Retour aux noms génériques. Détail: {e}")
             # Retourne une liste de noms génériques si l'extraction échoue
             return [f"Feature_{i}" for i in range(X_ref_processed.shape[1])]
 
@@ -148,7 +168,7 @@ def create_gauge_chart(probability, threshold):
             'borderwidth': 2,
             'bordercolor': "gray",
             'steps': [
-                {'range': [0, confidence_threshold], 'color': "red"},    
+                {'range': [0, confidence_threshold], 'color': "red"}, 
                 {'range': [confidence_threshold, 100], 'color': "green"} 
             ],
             'bar': {'color': 'black', 'thickness': 0.15}, 
@@ -163,8 +183,9 @@ def create_gauge_chart(probability, threshold):
     return fig
 
 
-# --- Fonction d'Appel de l'API  ---
+# --- Fonction d'Appel de l'API ---
 def get_prediction_from_api(client_features):
+    # Remplace les NaN/None par None pour l'API
     payload = {k: None if (pd.isna(v) or v == "") else v for k, v in client_features.items()}
     
     try:
@@ -198,7 +219,7 @@ st.markdown(
 )
 
 
-# --- Barre Latérale  ---
+# --- Barre Latérale ---
 
 # Affichage du logo dans la barre latérale
 try:
@@ -233,7 +254,7 @@ if st.sidebar.button("Calculer le Score (API)", key="calculate_score_quick"):
         st.toast(f"Score pour le client {client_id} calculé!", icon='🚀')
         st.rerun()
 
-# --- Formulaire de Modification  ---
+# --- Formulaire de Modification ---
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 📝 Modification des Données")
 
@@ -251,9 +272,9 @@ with st.sidebar.form(key=f"form_{client_id}"):
                     key=f"input_{feature}_{client_id}", 
                     label_visibility="collapsed"
                 )
-                
+            
             with col_label:
-                 st.caption(f"{feature}")
+                st.caption(f"{feature}")
 
             # Tentative de conversion de type pour l'API
             try:
@@ -352,8 +373,8 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
                     key='num_feat'
                 )
             else:
-                 st.warning("Variables SHAP non disponibles.")
-                 num_features_to_display = 10 
+                st.warning("Variables SHAP non disponibles.")
+                num_features_to_display = 10 
         
         if explainer and preprocessor_pipeline and X_ref_processed is not None and feature_names_processed is not None:
             try:
@@ -440,64 +461,157 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
             except Exception as e:
                 st.error(f"❌ Échec de l'Explication SHAP. Détail: {e}")
         else:
-             st.warning("Impossible de générer les graphiques SHAP. Vérifiez que le modèle et les données de référence sont chargés correctement.")
+            st.warning("Impossible de générer les graphiques SHAP. Vérifiez que le modèle et les données de référence sont chargés correctement.")
 
-    # --- CONTENU DE L'ONGLET 2 : COMPARAISON  ---
+    # --- CONTENU DE L'ONGLET 2 : COMPARAISON ---
     with tab_comparison:
-        st.subheader("Comparaison et Positionnement Client (Échantillon de Référence)")
+        st.subheader("Comparaison et Positionnement Client")
         
-        col_feat_1, col_feat_2 = st.columns(2)
+        # 1. Sélection et Analyse Univariée
+        st.markdown("---")
+        st.markdown("### Analyse Univariée (Distribution)")
 
-        with col_feat_1:
-            st.markdown("#### Analyse Univariée (Distribution)")
-            
-            features_to_compare = [col for col in full_population_stats.keys() if full_population_stats[col]['type'] == 'num']
-            selected_feature = st.selectbox(
-                "Choisissez la caractéristique numérique à comparer :",
-                features_to_compare,
-                key='feature_uni_tab'
-            )
-            
-            client_val = current_data.get(selected_feature)
+        # Séparation Numérique et Catégorielle
+        features_num = [col for col in full_population_stats.keys() if full_population_stats[col].get('type') == 'num']
+        features_cat = [col for col in full_population_stats.keys() if full_population_stats[col].get('type') == 'cat']
 
-            if pd.notna(client_val):
-                
-                fig_dist = px.histogram(df_data, x=selected_feature, color='TARGET', 
-                                        opacity=0.6, marginal="box", 
-                                        title=f"Distribution de '{selected_feature}' dans l'Échantillon")
-
-                fig_dist.add_vline(x=client_val, line_width=3, line_dash="dash", line_color="red", 
-                                   annotation_text="Client Actuel", annotation_position="top right")
-
-                st.plotly_chart(fig_dist, use_container_width=True, config={'displayModeBar': True})
-                
-                st.metric(label="Valeur Client Actuelle", value=f"{client_val:,.2f}")
-                
+        col_uni_type, col_uni_feat, col_uni_exp = st.columns([1, 1.5, 1])
+        
+        with col_uni_type:
+            analysis_type = st.radio("Type de Variable :", ('Numérique', 'Catégorielle'), horizontal=True)
+        
+        with col_uni_feat:
+            if analysis_type == 'Numérique':
+                selected_feature = st.selectbox(
+                    "Choisissez la caractéristique numérique à comparer :",
+                    features_num,
+                    key='feature_uni_num'
+                )
             else:
-                st.warning("Variable non numérique ou valeur manquante pour la comparaison.")
-
-
-        with col_feat_2:
-            st.markdown("#### Analyse Bivariée (Positionnement)")
+                selected_feature = st.selectbox(
+                    "Choisissez la caractéristique catégorielle à comparer :",
+                    features_cat,
+                    key='feature_uni_cat'
+                )
+                
+        with col_uni_exp:
+            show_explanation_uni = st.checkbox("Afficher l'explication (Uni.)", value=False)
             
-            num_features = [col for col in df_data.columns if df_data[col].dtype in [np.float64, np.int64] and col not in ['SK_ID_CURR', 'TARGET']]
+        # --- Création du graphique Univarié ---
+        
+        if selected_feature and selected_feature in current_data:
+            if 'TARGET' not in df_data.columns or df_data['TARGET'].isnull().all():
+                 st.error("La colonne 'TARGET' est manquante ou vide dans les données de l'échantillon.")
+            else:
+                client_val = current_data.get(selected_feature)
 
+                # Traitement Numérique
+                if analysis_type == 'Numérique':
+                    
+                    if pd.notna(client_val) and pd.api.types.is_numeric_dtype(df_data[selected_feature]):
+
+                        st.markdown(f"**Valeur Actuelle :** <span style='font-size: 1.2em; font-weight: bold;'>{client_val:,.2f}</span>", unsafe_allow_html=True)
+                        
+                        # Graphique Numérique (Box-Histogramme)
+                        fig_dist = px.histogram(df_data, x=selected_feature, color='TARGET', 
+                                                opacity=0.6, marginal="box", 
+                                                title=f"Distribution de '{selected_feature}' dans l'Échantillon (0=Approuvé, 1=Défaut)",
+                                                height=400,
+                                                color_discrete_map={'0': 'green', '1': 'red'}) 
+
+                        # Ligne verticale pour la valeur du client
+                        fig_dist.add_shape(type="line", x0=client_val, y0=0, x1=client_val, y1=1, 
+                                           yref='paper',
+                                           line=dict(color="red", width=3, dash="dash"))
+                        
+                        fig_dist.add_annotation(x=client_val, y=0.95, yref="paper", 
+                                                text="Client Actuel", showarrow=True, arrowhead=2, 
+                                                font=dict(color="red", size=14))
+
+                        st.plotly_chart(fig_dist, use_container_width=True, config={'displayModeBar': True})
+                        
+                        if show_explanation_uni:
+                            st.info(f"""
+                            **Interprétation (Analyse Numérique) :**
+                            Ce graphique compare la valeur du client (**ligne rouge en tirets**) à la distribution de tous les clients.
+                            L'histogramme (vert/rouge) montre la fréquence de la variable pour les clients approuvés (**vert**) et ceux en défaut (**rouge**).
+                            Regardez si la position du client est dans une zone où la majorité des clients sont en défaut (rouge) ou approuvés (vert).
+                            """)
+                    else:
+                        st.warning(f"La variable '{selected_feature}' n'est pas traitable comme numérique ou a une valeur manquante.")
+
+
+                # Traitement Catégoriel
+                elif analysis_type == 'Catégorielle':
+                    
+                    if pd.notna(client_val):
+                        st.markdown(f"**Catégorie Actuelle :** <span style='font-size: 1.2em; font-weight: bold;'>{client_val}</span>", unsafe_allow_html=True)
+                        
+                        # Préparation des données pour le bar chart (comptage par catégorie)
+                        df_counts = df_data.groupby(selected_feature)['TARGET'].value_counts(normalize=False).rename('Count').reset_index()
+                        df_counts['TARGET_Label'] = df_counts['TARGET'].astype(str).replace({
+                            '0': 'Approuvé (0)', 
+                            '1': 'Défaut (1)'
+                        })
+
+                        fig_cat = px.bar(df_counts, x=selected_feature, y='Count', color='TARGET_Label', 
+                                         title=f"Distribution de '{selected_feature}' dans l'Échantillon (Comptage)",
+                                         height=450,
+                                         color_discrete_map={'Approuvé (0)': 'green', 'Défaut (1)': 'red'})
+                        
+                        st.plotly_chart(fig_cat, use_container_width=True, config={'displayModeBar': True})
+                        
+                        if show_explanation_uni:
+                            st.info(f"""
+                            **Interprétation (Analyse Catégorielle) :**
+                            Ce graphique à barres montre la répartition des clients (Approuvé vs Défaut) pour chaque catégorie de la variable **'{selected_feature}'**.
+                            La catégorie actuelle du client est **'{client_val}'**. 
+                            Si la partie **rouge** est dominante dans cette catégorie, cela indique que les clients ayant cette caractéristique ont une forte propension au défaut.
+                            """)
+                    else:
+                        st.warning(f"La variable '{selected_feature}' a une valeur manquante pour ce client.")
+        
+        st.markdown("---")
+        
+        # 2. Analyse Bivariée
+        st.markdown("### Analyse Bivariée (Positionnement)")
+        
+        # Récupération des features numériques
+        num_features = [col for col in df_data.columns if df_data[col].dtype in [np.float64, np.int64] and col not in ['SK_ID_CURR', 'TARGET']]
+
+        col_biv_feat_x, col_biv_feat_y, col_biv_exp = st.columns([1, 1, 1])
+
+        with col_biv_feat_x:
             feat_x = st.selectbox("Axe X :", num_features, index=0, key='feat_x_tab')
+        with col_biv_feat_y:
             feat_y = st.selectbox("Axe Y :", num_features, index=1, key='feat_y_tab')
-            
-            fig_biv = px.scatter(df_data, x=feat_x, y=feat_y, color='TARGET', 
-                                  title=f"Relation entre {feat_x} et {feat_y} (Échantillon)",
-                                  color_continuous_scale=px.colors.sequential.Sunset,
-                                  hover_data=['SK_ID_CURR'])
-            
-            client_x = current_data.get(feat_x)
-            client_y = current_data.get(feat_y)
-            
-            if client_x is not None and client_y is not None:
-                fig_biv.add_scatter(x=[client_x], y=[client_y], mode='markers', name='Client Actuel', 
-                                     marker=dict(color='red', size=15, symbol='star', line=dict(width=2, color='DarkRed')))
+        with col_biv_exp:
+            show_explanation_biv = st.checkbox("Afficher l'explication (Biv.)", value=False)
+        
+        # Création du Scatter Plot
+        fig_biv = px.scatter(df_data, x=feat_x, y=feat_y, color='TARGET', 
+                             title=f"Relation entre {feat_x} et {feat_y} (Échantillon)",
+                             color_continuous_scale=px.colors.sequential.Inferno,
+                             hover_data=['SK_ID_CURR'])
+        
+        client_x = current_data.get(feat_x)
+        client_y = current_data.get(feat_y)
+        
+        if client_x is not None and client_y is not None:
+            # Ajout du point du client actuel (étoile rouge)
+            fig_biv.add_scatter(x=[client_x], y=[client_y], mode='markers', name='Client Actuel', 
+                                marker=dict(color='red', size=15, symbol='star', line=dict(width=2, color='DarkRed')))
 
-            st.plotly_chart(fig_biv, use_container_width=True, config={'displayModeBar': True})
+        fig_biv.update_layout(height=500)
+        st.plotly_chart(fig_biv, use_container_width=True, config={'displayModeBar': True})
+        
+        if show_explanation_biv:
+            st.info(f"""
+            **Interprétation (Analyse Bivariée) :**
+            Ce nuage de points compare la position du client actuel (**étoile rouge**) par rapport à l'échantillon complet selon deux variables, **{feat_x}** et **{feat_y}**.
+            La couleur des points (légende à droite) indique le statut de défaut (`TARGET`). 
+            Si l'**étoile rouge** se situe dans une zone majoritairement colorée en **foncé** (cible=1), cela signale un risque plus élevé basé sur la combinaison de ces deux variables.
+            """)
 
 else:
     st.info("Sélectionnez un client et cliquez sur **'Calculer le Score (API)'** dans la barre latérale pour démarrer l'analyse.")
