@@ -463,7 +463,7 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
                                                 opacity=0.6, marginal="box", 
                                                 title=f"Distribution de '{selected_feature}' dans l'Échantillon ",
                                                 height=400,
-                                                color_discrete_map={'0': 'green', '1': 'red'}) 
+                                                color_discrete_map={'Approuvé (0)': 'green', 'Défaut (1)': 'red'}) 
 
                         # Ligne verticale pour la valeur du client
                         fig_dist.add_shape(type="line", x0=client_val, y0=0, x1=client_val, y1=1, 
