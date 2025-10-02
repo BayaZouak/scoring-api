@@ -453,13 +453,17 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
 
                         st.markdown(f"**Valeur Actuelle :** <span style='font-size: 1.2em; font-weight: bold;'>{client_val:,.2f}</span>", unsafe_allow_html=True)
                         st.caption("Affichage de la distribution (Histogramme/Boxplot) pour cette variable numérique.")
+                        df_data['TARGET_Label'] = df_data['TARGET'].astype(str).replace({
+                            '0': 'Approuvé (0)', 
+                            '1': 'Défaut (1)'
+                        })
                         
                         # Graphique Numérique (Box-Histogramme)
-                        fig_dist = px.histogram(df_data, x=selected_feature, color=df_data['TARGET'].astype(str), 
+                        fig_dist = px.histogram(df_data, x=selected_feature, color='TARGET_Label', 
                                                 opacity=0.6, marginal="box", 
-                                                title=f"Distribution de '{selected_feature}' dans l'Échantillon (0=Approuvé, 1=Défaut)",
+                                                title=f"Distribution de '{selected_feature}' dans l'Échantillon ",
                                                 height=400,
-                                                color_discrete_map={'0': '#2ECC71', '1': '#E74C3C'}) 
+                                                color_discrete_map={'0': 'green', '1': 'red'}) 
 
                         # Ligne verticale pour la valeur du client
                         fig_dist.add_shape(type="line", x0=client_val, y0=0, x1=client_val, y1=1, 
