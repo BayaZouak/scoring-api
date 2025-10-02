@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 import joblib
 import uvicorn
-import shap 
+import shap
 from typing import Optional
 from fastapi import FastAPI, HTTPException
 from pydantic import create_model
@@ -58,7 +58,7 @@ try:
     feature_names_processed = get_processed_feature_names(preprocessor_pipeline, raw_feature_names, X_sample_processed) 
     
     # --- 4. Création et Calcul de l'Explainer SHAP Global ---
-    explainer = shap.TreeExplainer(final_classifier) 
+    explainer = shap.TreeExplainer(final_classifier)
     
     shap_values_global = explainer.shap_values(X_sample_processed)
     
@@ -93,7 +93,7 @@ try:
 
     for col in df_template_full.columns:
         if col == 'SK_ID_CURR':
-            fields[col] = (int, ...) 
+            fields[col] = (int, ...)
         elif df_template_full[col].dtype == np.int64:
             fields[col] = (Optional[int], None)
         elif df_template_full[col].dtype == np.float64:
@@ -164,7 +164,7 @@ async def predict_risk(client_data: ClientFeatures):
             client_shap_values = shap_values[1][0]
             base_value = explainer.expected_value[1]
         else:
-            client_shap_values = shap_values[0] 
+            client_shap_values = shap_values[0]
             base_value = explainer.expected_value
             
         # Conversion en listes natives pour l'envoi JSON
