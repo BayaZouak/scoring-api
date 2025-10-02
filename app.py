@@ -455,7 +455,7 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
                         st.caption("Affichage de la distribution (Histogramme/Boxplot) pour cette variable numérique.")
                         
                         # Graphique Numérique (Box-Histogramme)
-                        fig_dist = px.histogram(df_data, x=selected_feature, color='TARGET', 
+                        fig_dist = px.histogram(df_data, x=selected_feature, color=df_data['TARGET'].astype(str), 
                                                 opacity=0.6, marginal="box", 
                                                 title=f"Distribution de '{selected_feature}' dans l'Échantillon (0=Approuvé, 1=Défaut)",
                                                 height=400,
