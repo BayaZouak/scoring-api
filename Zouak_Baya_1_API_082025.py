@@ -40,6 +40,9 @@ GLOBAL_SHAP_VALUES = None
 GLOBAL_SHAP_BASE_VALUE = None
 GLOBAL_X_PROCESSED = None
 feature_names_processed = []
+explainer = None
+preprocessor_pipeline = None
+model_pipeline = None
 
 try:
     # --- 1. Chargement du Pipeline ---
@@ -48,8 +51,10 @@ try:
     final_classifier = model_pipeline.steps[-1][1]
     
     # --- 2. Préparation pour le SHAP Global et les Noms de Features ---
-    # Charger un petit échantillon de données brutes pour le SHAP Global
-    df_sample_raw = pd.read_csv('X_test_sample.csv') 
+    # Utilisation de client_sample_dashboard.csv pour l'échantillon SHAP Global
+    df_sample_raw = pd.read_csv('client_sample_dashboard.csv') 
+    df_sample_raw = df_sample_raw.drop(columns=['SK_ID_CURR', 'TARGET'], errors='ignore')
+    
     df_sample_fe = preprocess_data(df_sample_raw.copy()) 
     X_sample_processed = preprocessor_pipeline.transform(df_sample_fe)
 
@@ -76,7 +81,7 @@ try:
     print("✅ Modèle, SHAP Explainer et données globales chargés/calculés avec succès.")
     
 except FileNotFoundError as e:
-    raise RuntimeError(f"❌ Un fichier requis est introuvable : {e}. Assurez-vous d'avoir 'modele_de_scoring.pkl', 'application_train.csv' et 'X_test_sample.csv'.")
+    raise RuntimeError(f"❌ Un fichier requis est introuvable : {e}. Assurez-vous d'avoir 'modele_de_scoring.pkl', 'application_train.csv' et 'client_sample_dashboard.csv'.")
 except Exception as e:
     raise RuntimeError(f"❌ Erreur critique lors du chargement/initialisation : {e}")
 
@@ -113,7 +118,7 @@ except Exception as e:
 
 
 # =============================================================================
-# PARTIE 4 : Définition de l'API - NOUVEL ENDPOINT GLOBAL
+# PARTIE 4 : Définition de l'API - ENDPOINTS
 # =============================================================================
 
 app = FastAPI(
@@ -131,7 +136,6 @@ async def get_global_shap():
     if GLOBAL_SHAP_VALUES is None or GLOBAL_X_PROCESSED is None:
         raise HTTPException(status_code=500, detail="Les données SHAP globales n'ont pas été calculées au démarrage de l'API.")
     
-    # Gérer les matrices creuses si nécessaire (scikit-learn le fait souvent avec OHE)
     X_processed_list = GLOBAL_X_PROCESSED.toarray().tolist() if issparse(GLOBAL_X_PROCESSED) else GLOBAL_X_PROCESSED.tolist()
 
     return {
