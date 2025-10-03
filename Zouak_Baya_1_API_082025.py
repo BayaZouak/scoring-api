@@ -7,6 +7,7 @@ from pydantic import create_model
 from sklearn.pipeline import Pipeline
 from sklearn.compose import ColumnTransformer
 import shap
+from scipy.sparse import issparse
 
 BEST_THRESHOLD = 0.52
 
@@ -43,33 +44,36 @@ def clean_column_names(df):
     df.columns = ["".join(c if c.isalnum() else "_" for c in str(x)) for x in df.columns]
     return df
 
-def get_feature_names_from_column_transformer(ct: ColumnTransformer):
-    """Récupère tous les noms des features après transformation"""
+def get_feature_names(preprocessor, raw_feature_names):
+    """Extraire les noms de features post-prétraitement"""
     feature_names = []
-    for name, trans, cols in ct.transformers_:
-        if name == 'remainder' and trans == 'passthrough':
-            feature_names.extend(cols)
-        elif hasattr(trans, 'get_feature_names_out'):
-            try:
-                names = trans.get_feature_names_out(cols)
-                # Nettoyer les noms (num__col → col)
-                names = [n.split("__")[-1] for n in names]
-                feature_names.extend(names)
-            except:
-                feature_names.extend(cols)
+    try:
+        if isinstance(preprocessor, ColumnTransformer):
+            ct = preprocessor
         else:
-            feature_names.extend(cols)
-    return feature_names
+            ct = next(step[1] for step in preprocessor.steps if isinstance(step[1], ColumnTransformer))
+        for name, transformer, cols in ct.transformers_:
+            if transformer == 'drop':
+                continue
+            if transformer == 'passthrough':
+                feature_names.extend(cols)
+            elif hasattr(transformer, 'get_feature_names_out'):
+                names_out = transformer.get_feature_names_out(cols)
+                feature_names.extend([n.split("__")[-1] for n in names_out])
+            else:
+                feature_names.extend(cols if isinstance(cols, list) else [cols])
+        return feature_names
+    except Exception:
+        return [f"Feature_{i}" for i in range(len(raw_feature_names))]
 
-def transform_and_get_features(df: pd.DataFrame):
-    """Transforme les données via la pipeline et récupère les noms exacts des features"""
-    preprocessor = model_pipeline[:-1]
+def transform_data(pipeline, df):
+    """Transforme les données et retourne array + noms de features"""
+    preprocessor = Pipeline(pipeline.steps[:-1])
     X_trans = preprocessor.transform(df)
-    feature_names = get_feature_names_from_column_transformer(preprocessor)
-    if hasattr(X_trans, "toarray"):
+    feature_names = get_feature_names(preprocessor, df.columns.tolist())
+    if issparse(X_trans):
         X_trans = X_trans.toarray()
-    X_trans_df = pd.DataFrame(X_trans, columns=feature_names)
-    return X_trans_df, feature_names
+    return X_trans, feature_names, preprocessor
 
 # --- Endpoints ---
 @app.get("/")
@@ -99,9 +103,9 @@ async def shap_local(client_data: ClientFeatures):
     try:
         df = pd.DataFrame([client_data.model_dump()])
         df = clean_column_names(df)
-        X_trans_df, feature_names = transform_and_get_features(df)
+        X_trans, feature_names, preprocessor = transform_data(model_pipeline, df)
         explainer = shap.TreeExplainer(model_pipeline.steps[-1][1])
-        shap_vals = explainer.shap_values(X_trans_df)
+        shap_vals = explainer.shap_values(X_trans)
 
         if isinstance(shap_vals, list):
             vals = shap_vals[1][0].tolist() if len(shap_vals) > 1 else shap_vals[0][0].tolist()
@@ -118,12 +122,17 @@ async def shap_local(client_data: ClientFeatures):
 async def shap_global():
     try:
         df_ref = pd.read_csv("client_sample_dashboard.csv").drop(columns=["SK_ID_CURR","TARGET"], errors="ignore")
-        X_trans_df, feature_names = transform_and_get_features(df_ref)
+        X_trans, feature_names, preprocessor = transform_data(model_pipeline, df_ref)
         explainer = shap.TreeExplainer(model_pipeline.steps[-1][1])
-        shap_vals = explainer.shap_values(X_trans_df)
+
+        # Sample pour ne pas saturer
+        sample_indices = np.random.choice(X_trans.shape[0], size=min(500, X_trans.shape[0]), replace=False)
+        X_sample = X_trans[sample_indices]
+
+        shap_vals = explainer.shap_values(X_sample)
 
         if isinstance(shap_vals, list):
-            shap_mean = np.abs(shap_vals[1]).mean(axis=0) if len(shap_vals)>1 else np.abs(shap_vals[0]).mean(axis=0)
+            shap_mean = np.abs(shap_vals[1]).mean(axis=0) if len(shap_vals) > 1 else np.abs(shap_vals[0]).mean(axis=0)
         else:
             shap_mean = np.abs(shap_vals).mean(axis=0)
 
