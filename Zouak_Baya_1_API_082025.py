@@ -168,12 +168,12 @@ except Exception as e:
     raise RuntimeError(f"❌ Erreur lors de l'initialisation de SHAP global : {e}")
 
 
-@app.get("/shap_global")
+@app.get("/shap/global")
 async def shap_global():
     return shap_importance_global
 
 
-@app.post("/shap_local")
+@app.post("/shap")
 async def shap_local(client_data: ClientFeatures):
     try:
         df_raw = pd.DataFrame([client_data.model_dump()])
