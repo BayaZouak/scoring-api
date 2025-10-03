@@ -7,14 +7,13 @@ import plotly.express as px
 import plotly.graph_objects as go
 import shap
 import matplotlib.pyplot as plt
-import matplotlib # Nécessaire pour pyplot
+import matplotlib 
 
-# Assurez-vous que l'environnement Streamlit a matplotlib configuré
+
 matplotlib.use('Agg')
 
 # --- Configuration Globale et URLs de l'API ---
-# VEUILLEZ VÉRIFIER ET REMPLACER CETTE URL PAR VOTRE ADRESSE D'API DÉPLOYÉE !
-BASE_API_URL = "https://votre-api-deployee.com" 
+BASE_API_URL = "https://mon-projet-de-scoring-abcde.onrender.com"
 API_PREDICT_URL = f"{BASE_API_URL}/predict"
 API_EXPLAIN_URL = f"{BASE_API_URL}/explain"
 API_EXPLAIN_GLOBAL_URL = f"{BASE_API_URL}/explain_global" 
@@ -61,7 +60,7 @@ def create_gauge_chart(probability, threshold):
 def load_data():
     """Charge les données de l'échantillon pour la sélection client et la comparaison."""
     try:
-        # Nécessite le fichier 'client_sample_dashboard.csv' pour charger les ID et les stats de population
+        
         df_data = pd.read_csv('client_sample_dashboard.csv')
         client_ids = df_data['SK_ID_CURR'].unique().tolist()
 
