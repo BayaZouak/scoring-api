@@ -2,10 +2,10 @@ import pandas as pd
 import numpy as np
 import joblib
 import uvicorn
-from typing import Optional
+import random
+from typing import Optional, List, Dict, Any
 from fastapi import FastAPI, HTTPException
 from pydantic import create_model
-from utils import preprocess_data 
 from sklearn.pipeline import Pipeline
 from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import StandardScaler, OneHotEncoder
@@ -13,7 +13,7 @@ from sklearn.compose import ColumnTransformer
 import shap 
 
 # =============================================================================
-# PARTIE 1 : Préparation
+# PARTIE 1 : Préparation et Fonctions Utilitaires
 # =============================================================================
 
 def clean_column_names(df):
@@ -21,32 +21,25 @@ def clean_column_names(df):
     df.columns = ["".join(c if c.isalnum() else "_" for c in str(x)) for x in df.columns]
     return df
 
-# --- FONCTION D'EXTRACTION MANUELLE DES NOMS DE FEATURES (NOUVEAU) ---
-# Ceci est la clé pour corriger le problème de "Feature_0"
+# --- FONCTION D'EXTRACTION MANUELLE DES NOMS DE FEATURES (Correction de "Feature_0") ---
 def get_feature_names_manually(preprocessor_pipeline, raw_feature_names, X_ref_processed):
     """Tente d'extraire les noms de features post-traitement à partir du ColumnTransformer."""
     feature_names_processed = []
-    
-    # 1. Tenter d'accéder au ColumnTransformer
     ct = None
     if isinstance(preprocessor_pipeline, ColumnTransformer):
         ct = preprocessor_pipeline
     else:
-        # Chercher le ColumnTransformer dans le Pipeline
         for _, step in preprocessor_pipeline.steps:
             if isinstance(step, ColumnTransformer):
                 ct = step
                 break
     
     if ct is None:
-        # Cas de repli si on ne trouve pas le ColumnTransformer (ne devrait pas arriver)
         return [f"Feature_{i}" for i in range(X_ref_processed.shape[1])]
 
-    # 2. Parcourir les transformations
     for name, transformer, features in ct.transformers_:
         if name == 'remainder':
             if transformer == 'passthrough':
-                # Identifier les colonnes qui n'ont pas été transformées
                 cols_used = set()
                 for _, _, used_features in ct.transformers_:
                     if isinstance(used_features, list):
@@ -56,44 +49,22 @@ def get_feature_names_manually(preprocessor_pipeline, raw_feature_names, X_ref_p
                 feature_names_processed.extend(remainder_cols)
 
         elif transformer != 'drop':
-            # Utiliser get_feature_names_out si disponible sur le transformer interne
             if hasattr(transformer, 'get_feature_names_out'):
                 names_out = transformer.get_feature_names_out(features)
-                # On nettoie le préfixe du ColumnTransformer (ex: 'num__')
                 feature_names_processed.extend([n.split('__')[-1] for n in names_out])
             else:
-                # Pour les transformers simples sans get_feature_names_out
                 if isinstance(features, list):
                     feature_names_processed.extend(features)
             
     return feature_names_processed
 
 
-# On redéclare les composants pour éviter les erreurs avec joblib
-numerical_pipeline_recreate = Pipeline(steps=[
-    ('imputer', SimpleImputer(strategy='median')),
-    ('scaler', StandardScaler())
-])
-
-categorical_pipeline_recreate = Pipeline(steps=[
-    ('imputer', SimpleImputer(strategy='most_frequent')),
-    ('onehot', OneHotEncoder(handle_unknown='ignore'))
-])
-
-preprocessor_recreate = ColumnTransformer(
-    transformers=[
-        ('num', numerical_pipeline_recreate, []),
-        ('cat', categorical_pipeline_recreate, [])
-    ],
-    remainder='passthrough'
-)
-
-
 # =============================================================================
-# PARTIE 2 : Chargement du modèle et initialisation SHAP (CORRIGÉE)
+# PARTIE 2 : Chargement du Modèle, Préparation des Données et Calcul Global
 # =============================================================================
 
 BEST_THRESHOLD = 0.52
+MAX_SHAP_GLOBAL_SAMPLES = 500 # Limite de l'échantillon pour le calcul Global
 
 try:
     model_pipeline = joblib.load('modele_de_scoring.pkl')
@@ -105,24 +76,44 @@ try:
     # --- Chargement des données de référence pour SHAP ---
     try:
         df_ref = pd.read_csv('client_sample_dashboard.csv').drop(columns=['SK_ID_CURR', 'TARGET'], errors='ignore')
-        X_ref_processed = preprocessor.transform(df_ref)
-        feature_names_raw = df_ref.columns.tolist() # Noms des features avant pré-traitement
+        X_ref_processed_full = preprocessor.transform(df_ref)
+        
+        # Échantillonnage des données de référence pour l'Explainer SHAP
+        if X_ref_processed_full.shape[0] > MAX_SHAP_GLOBAL_SAMPLES:
+            sample_indices = random.sample(range(X_ref_processed_full.shape[0]), MAX_SHAP_GLOBAL_SAMPLES)
+            X_ref_processed = X_ref_processed_full[sample_indices]
+        else:
+            X_ref_processed = X_ref_processed_full
+            
+        feature_names_raw = df_ref.columns.tolist() 
     except FileNotFoundError:
         raise RuntimeError("Un fichier de données de référence (client_sample_dashboard.csv) est requis pour SHAP.")
 
-    # --- Détermination des noms des features post-traitement (LOGIQUE CORRIGÉE) ---
+    # --- Détermination des noms des features post-traitement ---
     try:
-        # Tenter d'abord la méthode standard (plus rapide si elle fonctionne)
         feature_names_full = preprocessor.get_feature_names_out().tolist()
         GLOBAL_FEATURE_NAMES = [name.split('__')[-1] for name in feature_names_full]
-        print("Les noms de features ont été extraits par get_feature_names_out().")
     except Exception:
-        # En cas d'échec, utiliser la fonction manuelle de secours
         GLOBAL_FEATURE_NAMES = get_feature_names_manually(preprocessor, feature_names_raw, X_ref_processed)
-        print("Avertissement: Utilisation de l'extraction manuelle des noms de features.")
     
     # --- Initialisation de l'Explainer SHAP ---
     explainer = shap.TreeExplainer(final_classifier, X_ref_processed)
+    
+    # --- Calcul du SHAP GLOBAL (Mise en cache) ---
+    GLOBAL_SHAP_VALUES = explainer.shap_values(X_ref_processed)
+    
+    if isinstance(GLOBAL_SHAP_VALUES, list):
+        # On prend les valeurs pour la classe 1 (défaut)
+        GLOBAL_SHAP_SUM = np.abs(GLOBAL_SHAP_VALUES[1]).mean(axis=0) if len(GLOBAL_SHAP_VALUES) > 1 else np.abs(GLOBAL_SHAP_VALUES[0]).mean(axis=0)
+    else:
+        GLOBAL_SHAP_SUM = np.abs(GLOBAL_SHAP_VALUES).mean(axis=0)
+    
+    GLOBAL_SHAP_IMPORTANCE = pd.DataFrame({
+        'Feature': GLOBAL_FEATURE_NAMES,
+        'Importance': GLOBAL_SHAP_SUM
+    }).sort_values(by='Importance', ascending=False).to_dict('records') # Format JSON simple
+
+    print("✅ Calcul SHAP Global effectué et mis en cache.")
     
 except FileNotFoundError:
     raise RuntimeError("❌ Le fichier 'modele_de_scoring.pkl' est introuvable.")
@@ -134,10 +125,11 @@ except Exception as e:
 # PARTIE 3 : Création dynamique du modèle Pydantic
 # =============================================================================
 
+# Le code ici suppose que vous avez un fichier application_train.csv pour le typage
 try:
     df_raw_template = pd.read_csv('application_train.csv', nrows=1)
     fields = {}
-
+    # ... (Logique de création du modèle Pydantic) ...
     for col in df_raw_template.columns:
         if col == 'SK_ID_CURR':
             fields[col] = (int, ...) 
@@ -150,7 +142,6 @@ try:
 
     if 'TARGET' in fields:
         del fields['TARGET']
-
     ClientFeatures = create_model('ClientFeatures', **fields)
 
 except FileNotFoundError:
@@ -160,7 +151,7 @@ except Exception as e:
 
 
 # =============================================================================
-# PARTIE 4 : Définition de l'API FastAPI
+# PARTIE 4 : Définition de l'API FastAPI et Endpoints
 # =============================================================================
 
 app = FastAPI(
@@ -170,7 +161,7 @@ app = FastAPI(
 
 @app.get("/")
 def home():
-    return {"message": "Bienvenue sur l'API de scoring de crédit. Utilisez /predict pour envoyer une prédiction."}
+    return {"message": "Bienvenue sur l'API de scoring de crédit."}
 
 
 @app.post("/predict")
@@ -197,21 +188,19 @@ async def predict_risk(client_data: ClientFeatures):
 
 @app.post("/explain")
 async def explain_client(client_data: ClientFeatures):
+    """Calcule les valeurs SHAP LOCALES pour un client donné."""
     try:
         df_raw = pd.DataFrame([client_data.model_dump()])
         df_raw = clean_column_names(df_raw)
         client_id = df_raw['SK_ID_CURR'].iloc[0]
         df_explain = df_raw.drop('SK_ID_CURR', axis=1, errors='ignore')
         
-        # Pré-traitement des données du client
         X_client_processed = preprocessor.transform(df_explain)
         if hasattr(X_client_processed, 'toarray'):
             X_client_processed = X_client_processed.toarray()
 
-        # Calcul des valeurs SHAP
         shap_values = explainer.shap_values(X_client_processed)
         
-        # Gestion des modèles à deux classes
         if isinstance(shap_values, list):
             client_shap_values = shap_values[1][0].tolist() 
             base_value = explainer.expected_value[1]
@@ -224,9 +213,17 @@ async def explain_client(client_data: ClientFeatures):
             "shap_values": client_shap_values,
             "base_value": float(base_value),
             "client_data_processed": X_client_processed[0].tolist(),
-            # C'est ici que nous retournons les noms de features correctement extraits
-            "feature_names_processed": GLOBAL_FEATURE_NAMES 
+            "feature_names_processed": GLOBAL_FEATURE_NAMES # Les noms de features sont ici!
         }
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"❌ Le calcul SHAP a échoué : {e}")
+
+
+@app.get("/explain_global", response_model=List[Dict[str, Any]])
+async def explain_global():
+    """Renvoie les importances SHAP GLOBALES (moyennes) mises en cache."""
+    try:
+        return GLOBAL_SHAP_IMPORTANCE
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"❌ Échec de la récupération de l'importance globale : {e}")
