@@ -13,7 +13,7 @@ import matplotlib
 matplotlib.use('Agg')
 
 # --- Configuration Globale et URLs de l'API ---
-BASE_API_URL = "https://mon-projet-de-scoring-abcde.onrender.com"
+BASE_API_URL = "https://scoring-api-latest.onrender.com"
 API_PREDICT_URL = f"{BASE_API_URL}/predict"
 API_EXPLAIN_URL = f"{BASE_API_URL}/explain"
 API_EXPLAIN_GLOBAL_URL = f"{BASE_API_URL}/explain_global" 
