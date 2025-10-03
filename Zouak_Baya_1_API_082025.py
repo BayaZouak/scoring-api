@@ -1,18 +1,19 @@
 import pandas as pd
 import numpy as np
 import joblib
-import uvicorn
 from typing import Optional
 from fastapi import FastAPI, HTTPException
 from pydantic import create_model
 
-from utils import preprocess_data 
 from sklearn.pipeline import Pipeline
 from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import StandardScaler, OneHotEncoder
 from sklearn.compose import ColumnTransformer
 import shap
 
+# =============================================================================
+# Préparation
+# =============================================================================
 def clean_column_names(df):
     df.columns = ["".join(c if c.isalnum() else "_" for c in str(x)) for x in df.columns]
     return df
@@ -37,6 +38,9 @@ preprocessor_recreate = ColumnTransformer(
 
 BEST_THRESHOLD = 0.52
 
+# =============================================================================
+# Chargement modèle
+# =============================================================================
 try:
     model_pipeline = joblib.load('modele_de_scoring.pkl')
     print("✅ Modèle chargé avec succès.")
@@ -45,6 +49,9 @@ except FileNotFoundError:
 except Exception as e:
     raise RuntimeError(f"❌ Erreur lors du chargement du modèle : {e}")
 
+# =============================================================================
+# Création dynamique modèle Pydantic
+# =============================================================================
 try:
     df_raw_template = pd.read_csv('application_train.csv', nrows=1)
     fields = {}
@@ -65,6 +72,9 @@ except FileNotFoundError:
 except Exception as e:
     raise RuntimeError(f"❌ Erreur lors de la génération de la classe ClientFeatures : {e}")
 
+# =============================================================================
+# API
+# =============================================================================
 app = FastAPI(
     title="API de Scoring Prêt à Dépenser",
     description="API de prédiction de défaut de paiement pour les clients."
@@ -74,6 +84,9 @@ app = FastAPI(
 def home():
     return {"message": "Bienvenue sur l'API de scoring de crédit. Utilisez /predict, /shap ou /shap/global."}
 
+# -----------------
+# Prediction
+# -----------------
 @app.post("/predict")
 async def predict_risk(client_data: ClientFeatures):
     try:
@@ -94,6 +107,9 @@ async def predict_risk(client_data: ClientFeatures):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"❌ La prédiction a échoué : {e}")
 
+# -----------------
+# SHAP local
+# -----------------
 @app.post("/shap")
 async def shap_values(client_data: ClientFeatures):
     try:
@@ -104,6 +120,18 @@ async def shap_values(client_data: ClientFeatures):
         preprocessor_pipeline = Pipeline(model_pipeline.steps[:-1])
         final_classifier = model_pipeline.steps[-1][1]
         X_client_processed = preprocessor_pipeline.transform(df_predict)
+
+        # Extraction des noms de features après transformation
+        feature_names = []
+        for name, transformer, features in preprocessor_pipeline.transformers_:
+            if name == 'remainder' and transformer == 'passthrough':
+                remainder_cols = [col for col in df_predict.columns if col not in sum([f if isinstance(f,list) else [] for _,_,f in preprocessor_pipeline.transformers_], [])]
+                feature_names.extend(remainder_cols)
+            elif transformer != 'drop':
+                if hasattr(transformer, 'get_feature_names_out'):
+                    feature_names.extend([n.split('__')[-1] for n in transformer.get_feature_names_out(features)])
+                else:
+                    feature_names.extend(features)
 
         explainer = shap.TreeExplainer(final_classifier)
         shap_vals = explainer.shap_values(X_client_processed)
@@ -118,11 +146,14 @@ async def shap_values(client_data: ClientFeatures):
         return {
             "shap_values": client_shap,
             "base_value": base_value,
-            "feature_names": df_predict.columns.tolist()
+            "feature_names": feature_names
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"❌ Calcul SHAP local échoué : {e}")
 
+# -----------------
+# SHAP global
+# -----------------
 @app.get("/shap/global")
 async def shap_global():
     try:
@@ -130,6 +161,18 @@ async def shap_global():
         preprocessor_pipeline = Pipeline(model_pipeline.steps[:-1])
         final_classifier = model_pipeline.steps[-1][1]
         X_ref_processed = preprocessor_pipeline.transform(df_ref)
+
+        # Extraction des noms de features après transformation
+        feature_names = []
+        for name, transformer, features in preprocessor_pipeline.transformers_:
+            if name == 'remainder' and transformer == 'passthrough':
+                remainder_cols = [col for col in df_ref.columns if col not in sum([f if isinstance(f,list) else [] for _,_,f in preprocessor_pipeline.transformers_], [])]
+                feature_names.extend(remainder_cols)
+            elif transformer != 'drop':
+                if hasattr(transformer, 'get_feature_names_out'):
+                    feature_names.extend([n.split('__')[-1] for n in transformer.get_feature_names_out(features)])
+                else:
+                    feature_names.extend(features)
 
         explainer = shap.TreeExplainer(final_classifier)
         shap_vals = explainer.shap_values(X_ref_processed)
@@ -140,7 +183,7 @@ async def shap_global():
             shap_sum = np.abs(shap_vals).mean(axis=0)
 
         importance = pd.DataFrame({
-            "feature": df_ref.columns.tolist(),
+            "feature": feature_names,
             "importance": shap_sum
         }).sort_values(by="importance", ascending=False)
 
