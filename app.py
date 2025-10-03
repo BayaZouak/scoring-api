@@ -7,22 +7,61 @@ import plotly.express as px
 import plotly.graph_objects as go
 import shap
 import matplotlib.pyplot as plt
-# Suppression des imports du modèle local : joblib, Pipeline, etc.
+import matplotlib # Nécessaire pour pyplot
+
+# Assurez-vous que l'environnement Streamlit a matplotlib configuré
+matplotlib.use('Agg')
 
 # --- Configuration Globale et URLs de l'API ---
-BASE_API_URL = "https://scoring-api-latest.onrender.com" # ADRESSE À VÉRIFIER
+# VEUILLEZ VÉRIFIER ET REMPLACER CETTE URL PAR VOTRE ADRESSE D'API DÉPLOYÉE !
+BASE_API_URL = "https://votre-api-deployee.com" 
 API_PREDICT_URL = f"{BASE_API_URL}/predict"
 API_EXPLAIN_URL = f"{BASE_API_URL}/explain"
 API_EXPLAIN_GLOBAL_URL = f"{BASE_API_URL}/explain_global" 
 BEST_THRESHOLD = 0.52
 st.set_page_config(layout="wide", page_title="Dashboard Scoring Crédit")
 
-# --- Fonctions de Chargement et d'Appel API ---
+
+# =============================================================================
+# FONCTIONS DE VISUALISATION ET DE CONNEXION API
+# =============================================================================
+
+def create_gauge_chart(probability, threshold):
+    """Crée le graphique en jauge pour le score de confiance."""
+    confidence_score = (1 - probability) * 100
+    confidence_threshold = (1 - threshold) * 100
+    fig = go.Figure(go.Indicator(
+        mode = "gauge+number",
+        value = confidence_score,
+        domain = {'x': [0, 1], 'y': [0, 1]},
+        title = {'text': "Score de Confiance (100 = Risque Faible)", 'font': {'size': 18}},
+        number={'suffix': "%", 'font': {'size': 48}},
+        gauge = {
+            'shape': "angular",
+            'axis': {'range': [0, 100], 'tickwidth': 1, 'tickcolor': "darkblue"},
+            'bar': {'color': "rgba(0,0,0,0)"},
+            'bgcolor': "white",
+            'borderwidth': 2,
+            'bordercolor': "gray",
+            'steps': [
+                {'range': [0, confidence_threshold], 'color': "red"},
+                {'range': [confidence_threshold, 100], 'color': "green"}
+            ],
+            'bar': {'color': 'black', 'thickness': 0.15},
+            'threshold': {
+                'line': {'color': "black", 'width': 4},
+                'thickness': 0.75,
+                'value': confidence_threshold
+            }}
+    ))
+    fig.update_layout(height=400, margin=dict(l=10, r=10, t=50, b=10))
+    return fig
 
 @st.cache_data
 def load_data():
-    """Charge les données de l'échantillon et calcule les métadonnées pour les graphiques de comparaison."""
+    """Charge les données de l'échantillon pour la sélection client et la comparaison."""
     try:
+        # Nécessite le fichier 'client_sample_dashboard.csv' pour charger les ID et les stats de population
         df_data = pd.read_csv('client_sample_dashboard.csv')
         client_ids = df_data['SK_ID_CURR'].unique().tolist()
 
@@ -41,43 +80,41 @@ def load_data():
         return df_data, client_ids, full_population_stats
 
     except FileNotFoundError as e:
-        st.error(f"❌ Un fichier de données est manquant. Erreur: {e}")
+        st.error(f"❌ Le fichier de données 'client_sample_dashboard.csv' est manquant. Erreur: {e}")
         return pd.DataFrame(), [], {}
 
-@st.cache_data(show_spinner="Calcul de l'importance globale des variables...")
+@st.cache_data(show_spinner="Récupération de l'importance globale...")
 def get_global_shap_importance():
-    """Récupère l'importance SHAP Global depuis l'API."""
+    """Récupère l'importance SHAP Global depuis l'API (appel GET)."""
     try:
         response = requests.get(API_EXPLAIN_GLOBAL_URL)
         response.raise_for_status()
         return response.json()
     except requests.exceptions.RequestException as e:
-        st.error(f"❌ Erreur de connexion ou API indisponible pour le SHAP Global. Détail: {e}")
+        st.error(f"❌ Erreur de connexion ou API indisponible pour le SHAP Global. Vérifiez l'URL de l'API. Détail: {e}")
         return None
 
 def get_api_result(client_features, endpoint="predict"):
-    """Appel générique aux endpoints de l'API."""
+    """Appel générique aux endpoints de l'API (POST)."""
+    # Remplacer les NaN/chaînes vides par None pour le format Pydantic de l'API
     payload = {k: None if (pd.isna(v) or v == "") else v for k, v in client_features.items()}
 
-    if endpoint == "predict":
-        url = API_PREDICT_URL
-    elif endpoint == "explain":
-        url = API_EXPLAIN_URL
-    else:
-        st.error(f"Endpoint inconnu: {endpoint}")
-        return None
-
+    url = API_PREDICT_URL if endpoint == "predict" else API_EXPLAIN_URL
+    
     try:
         response = requests.post(url, json=payload)
         response.raise_for_status()
         return response.json()
     except requests.exceptions.RequestException as e:
-        st.error(f"❌ Erreur de connexion ou API indisponible pour l'endpoint {endpoint}. Détail: {e}")
+        st.error(f"❌ Erreur lors de l'appel à l'API sur l'endpoint {endpoint}. Détail: {e}")
         return None
 
-# --- Chargement ---
+# =============================================================================
+# CHARGEMENT DES DONNÉES ET INITIALISATION
+# =============================================================================
+
 df_data, client_ids, full_population_stats = load_data()
-global_shap_data = get_global_shap_importance() # Appel de la nouvelle fonction API
+global_shap_data = get_global_shap_importance() 
 
 
 # =============================================================================
@@ -85,8 +122,6 @@ global_shap_data = get_global_shap_importance() # Appel de la nouvelle fonction 
 # =============================================================================
 
 st.markdown("<style>.block-container {padding-top: 1rem;}</style>", unsafe_allow_html=True)
-
-# Centrage du titre
 st.markdown(
     """
     <div style='text-align: center;'>
@@ -97,14 +132,11 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-
 # --- Barre Latérale et Sélection Client ---
-
-# ... (Code d'affichage du logo et de la sélection du client ID) ...
 try:
     st.sidebar.image('logo_entreprise.png', use_container_width=True)
 except FileNotFoundError:
-    st.sidebar.warning("⚠️ Logo non trouvé.")
+    st.sidebar.warning("⚠️ Logo non trouvé. Placez 'logo_entreprise.png' à la racine.")
 st.sidebar.markdown("---")
 
 st.sidebar.header("🔍 Sélection Client")
@@ -119,26 +151,24 @@ data_to_send = {'SK_ID_CURR': client_id}
 edited_data = {}
 
 # --- Boutons d'Appel API ---
-
-# Logique de calcul simple (bouton rapide)
 if st.sidebar.button("Calculer le Score (API)", key="calculate_score_quick"):
     data_to_send.update({k: v for k, v in client_data_raw.items() if k not in ['SK_ID_CURR', 'TARGET']})
-    api_result = get_api_result(data_to_send, endpoint="predict")
-
-    if api_result:
+    
+    with st.spinner("Calcul de prédiction et SHAP en cours via l'API..."):
+        api_result = get_api_result(data_to_send, endpoint="predict")
         shap_result = get_api_result(data_to_send, endpoint="explain")
-        if shap_result:
-            st.session_state['api_result'] = api_result
-            st.session_state['shap_result'] = shap_result
-            st.session_state['current_client_data'] = data_to_send
-            st.toast(f"Score et Explication pour le client {client_id} calculés!", icon='🚀')
-            st.rerun()
 
-# Logique de modification/recalcul (formulaire)
+    if api_result and shap_result:
+        st.session_state['api_result'] = api_result
+        st.session_state['shap_result'] = shap_result
+        st.session_state['current_client_data'] = data_to_send
+        st.toast(f"Score et Explication pour le client {client_id} calculés!", icon='🚀')
+        st.rerun()
+
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 📝 Modification des Données")
 
-# ... (Formulaire de modification et bouton de soumission - logiques inchangées) ...
+# --- Formulaire de modification ---
 with st.sidebar.form(key=f"form_{client_id}"):
     st.markdown("Modifiez les variables ci-dessous pour simuler un nouveau score :")
 
@@ -159,16 +189,17 @@ with st.sidebar.form(key=f"form_{client_id}"):
 
 if submit_button_mod:
     data_to_send.update(edited_data)
-    api_result = get_api_result(data_to_send, endpoint="predict")
-
-    if api_result:
+    
+    with st.spinner("Recalcul de prédiction et SHAP en cours via l'API..."):
+        api_result = get_api_result(data_to_send, endpoint="predict")
         shap_result = get_api_result(data_to_send, endpoint="explain")
-        if shap_result:
-            st.session_state['api_result'] = api_result
-            st.session_state['shap_result'] = shap_result
-            st.session_state['current_client_data'] = data_to_send
-            st.toast(f"Score pour le client {client_id} (modifié) mis à jour!", icon='🔄')
-            st.rerun()
+
+    if api_result and shap_result:
+        st.session_state['api_result'] = api_result
+        st.session_state['shap_result'] = shap_result
+        st.session_state['current_client_data'] = data_to_send
+        st.toast(f"Score pour le client {client_id} (modifié) mis à jour!", icon='🔄')
+        st.rerun()
 
 
 # --- Affichage Principal ---
@@ -182,9 +213,8 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
     st.markdown("---")
 
     # =============================================================================
-    # 1. Score et Jauge (Logique inchangée)
+    # 1. Score et Jauge
     # =============================================================================
-    # ... (Code d'affichage du Score et de la Jauge) ...
     st.subheader("Score de Probabilité de Défaut et Confiance")
 
     col_score, col_jauge, col_decision = st.columns([1, 2, 1])
@@ -195,7 +225,7 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
 
     with col_jauge:
         gauge_fig = create_gauge_chart(prob, BEST_THRESHOLD)
-        st.plotly_chart(gauge_fig, use_container_width=True, config={'displayModeBar': True})
+        st.plotly_chart(gauge_fig, use_container_width=True, config={'displayModeBar': False})
 
     with col_decision:
         color = "red" if decision == 1 else "green"
@@ -291,10 +321,9 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
         else:
             st.info("Veuillez calculer le score pour ce client et vérifier la disponibilité de l'API pour afficher les graphiques SHAP.")
 
-    # --- CONTENU DE L'ONGLET 2 : COMPARAISON (Logique inchangée) ---
+    # --- CONTENU DE L'ONGLET 2 : COMPARAISON ---
     with tab_comparison:
         st.subheader("Comparaison et Positionnement Client")
-        # ... (Logique d'analyse univariée et bivariée inchangée) ...
         
         # 1. Sélection et Analyse Univariée
         st.markdown("---")
