@@ -6,11 +6,13 @@ from typing import Optional
 from fastapi import FastAPI, HTTPException
 from pydantic import create_model
 
-import shap
+from utils import preprocess_data 
 from sklearn.pipeline import Pipeline
 from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import StandardScaler, OneHotEncoder
 from sklearn.compose import ColumnTransformer
+
+import shap
 
 
 # =============================================================================
@@ -36,7 +38,7 @@ categorical_pipeline_recreate = Pipeline(steps=[
 preprocessor_recreate = ColumnTransformer(
     transformers=[
         ('num', numerical_pipeline_recreate, []),
-        ('cat', categorical_pipeline_recreate, [])
+        ('cat', categorical_pipeline_recreate, []),
     ],
     remainder='passthrough'
 )
@@ -62,7 +64,7 @@ except Exception as e:
 # =============================================================================
 
 try:
-    df_raw_template = pd.read_csv('application_train.csv', nrows=1)
+    df_raw_template = pd.read_csv('client_sample_dashboard.csv', nrows=1)  # ⚠️ remplacé par client_sample_dashboard
     fields = {}
 
     for col in df_raw_template.columns:
@@ -81,7 +83,7 @@ try:
     ClientFeatures = create_model('ClientFeatures', **fields)
 
 except FileNotFoundError:
-    raise RuntimeError("❌ Le fichier 'application_train.csv' est requis pour générer le modèle Pydantic.")
+    raise RuntimeError("❌ Le fichier 'client_sample_dashboard.csv' est requis pour générer le modèle Pydantic.")
 except Exception as e:
     raise RuntimeError(f"❌ Erreur lors de la génération de la classe ClientFeatures : {e}")
 
@@ -97,7 +99,7 @@ app = FastAPI(
 
 @app.get("/")
 def home():
-    return {"message": "Bienvenue sur l'API de scoring de crédit. Utilisez /predict, /shap_local et /shap_global."}
+    return {"message": "Bienvenue sur l'API de scoring de crédit. Utilisez /predict pour envoyer une prédiction."}
 
 
 @app.post("/predict")
@@ -123,78 +125,52 @@ async def predict_risk(client_data: ClientFeatures):
 
 
 # =============================================================================
-# PARTIE 5 : SHAP (local et global)
+# PARTIE 5 : Endpoints SHAP
 # =============================================================================
 
-def get_transformed_data(df):
-    """Passe les données par le preprocess du pipeline et récupère les features encodés."""
-    preprocessor = model_pipeline[:-1]  # tout sauf le modèle final
-    X_trans = preprocessor.transform(df)
-
-    # Récupération des noms de features
+@app.post("/shap")
+async def shap_local(client_data: ClientFeatures):
+    """
+    Retourne les valeurs SHAP pour un client (explication locale).
+    """
     try:
-        feature_names = preprocessor.get_feature_names_out()
-    except Exception:
-        feature_names = [f"Feature_{i}" for i in range(X_trans.shape[1])]
+        df_raw = pd.DataFrame([client_data.model_dump()])
+        df_raw = clean_column_names(df_raw)
+        df_predict = df_raw.drop('SK_ID_CURR', axis=1, errors='ignore')
 
-    if hasattr(X_trans, "toarray"):
-        X_trans = X_trans.toarray()
+        # Calcul SHAP
+        explainer = shap.Explainer(model_pipeline.named_steps['classifier'], model_pipeline.named_steps['preprocessor'].transform(df_predict))
+        shap_values = explainer(df_predict)
 
-    return pd.DataFrame(X_trans, columns=feature_names)
+        return {
+            "shap_values": shap_values.values[0].tolist(),
+            "base_value": float(shap_values.base_values[0]),
+            "feature_names": list(df_predict.columns)
+        }
 
-
-# --- Pré-calcul SHAP global ---
-try:
-    df_global_ref = pd.read_csv("client_sample_dashboard.csv").drop(columns=["SK_ID_CURR","TARGET"], errors="ignore")
-    df_global_ref = clean_column_names(df_global_ref)
-    X_global = get_transformed_data(df_global_ref)
-
-    explainer_global = shap.TreeExplainer(model_pipeline.steps[-1][1])
-    shap_vals_global = explainer_global.shap_values(X_global)
-
-    if isinstance(shap_vals_global, list):
-        shap_mean_global = np.abs(shap_vals_global[1]).mean(axis=0) if len(shap_vals_global) > 1 else np.abs(shap_vals_global[0]).mean(axis=0)
-    else:
-        shap_mean_global = np.abs(shap_vals_global).mean(axis=0)
-
-    shap_importance_global = pd.DataFrame({
-        "feature": X_global.columns,
-        "importance": shap_mean_global
-    }).sort_values("importance", ascending=False).to_dict(orient="records")
-
-    print("✅ SHAP global pré-calculé")
-
-except Exception as e:
-    raise RuntimeError(f"❌ Erreur lors de l'initialisation de SHAP global : {e}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"❌ Erreur SHAP locale : {e}")
 
 
 @app.get("/shap/global")
 async def shap_global():
-    return shap_importance_global
-
-
-@app.post("/shap")
-async def shap_local(client_data: ClientFeatures):
+    """
+    Retourne les valeurs SHAP globales (moyenne absolue sur un échantillon).
+    """
     try:
-        df_raw = pd.DataFrame([client_data.model_dump()])
-        df_raw = clean_column_names(df_raw)
-        X_trans = get_transformed_data(df_raw.drop("SK_ID_CURR", axis=1, errors="ignore"))
+        df_sample = pd.read_csv("client_sample_dashboard.csv").drop(columns=['SK_ID_CURR', 'TARGET'], errors="ignore")
+        df_sample = clean_column_names(df_sample)
 
-        explainer = shap.TreeExplainer(model_pipeline.steps[-1][1])
-        shap_vals = explainer.shap_values(X_trans)
+        # On prend un petit échantillon pour accélérer
+        df_sample = df_sample.sample(n=500, random_state=42)
 
-        if isinstance(shap_vals, list):
-            vals = shap_vals[1][0].tolist() if len(shap_vals) > 1 else shap_vals[0][0].tolist()
-            base_value = float(explainer.expected_value[1]) if len(shap_vals) > 1 else float(explainer.expected_value[0])
-        else:
-            vals = shap_vals[0].tolist()
-            base_value = float(explainer.expected_value)
+        explainer = shap.Explainer(model_pipeline.named_steps['classifier'], model_pipeline.named_steps['preprocessor'].transform(df_sample))
+        shap_values = explainer(df_sample)
 
         return {
-            "shap_values": vals,
-            "base_value": base_value,
-            "feature_names": X_trans.columns.tolist()
+            "shap_values": shap_values.values.tolist(),
+            "feature_names": list(df_sample.columns)
         }
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"❌ Erreur SHAP local : {e}")
+        raise HTTPException(status_code=500, detail=f"❌ Erreur SHAP globale : {e}")
