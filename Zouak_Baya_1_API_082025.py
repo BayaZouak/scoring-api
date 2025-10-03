@@ -11,14 +11,14 @@ from scipy.sparse import issparse
 
 BEST_THRESHOLD = 0.52
 
-# --- Chargement modèle ---
+# --- Chargement du modèle pipeline complet ---
 try:
     model_pipeline = joblib.load('modele_de_scoring.pkl')
     print("✅ Modèle chargé avec succès.")
 except Exception as e:
     raise RuntimeError(f"Erreur chargement modèle : {e}")
 
-# --- Création dynamique Pydantic ---
+# --- Création dynamique Pydantic à partir du CSV template ---
 try:
     df_template = pd.read_csv('application_train.csv', nrows=1)
     fields = {}
@@ -44,34 +44,23 @@ def clean_column_names(df):
     df.columns = ["".join(c if c.isalnum() else "_" for c in str(x)) for x in df.columns]
     return df
 
-def get_feature_names_from_column_transformer(ct):
-    feature_names = []
-    for name, pipe, cols in ct.transformers_:
-        if name == 'remainder' and pipe == 'passthrough':
-            feature_names.extend(cols)
-        elif isinstance(pipe, Pipeline):
-            last_step = pipe.steps[-1][1]
-            if hasattr(last_step, 'get_feature_names_out'):
-                try:
-                    fn = last_step.get_feature_names_out(cols)
-                    feature_names.extend(fn)
-                except:
-                    feature_names.extend(cols)
-            else:
-                feature_names.extend(cols)
-        else:
-            feature_names.extend(cols)
-    feature_names = [f.split("__")[-1] for f in feature_names]
-    return feature_names
+def transform_with_feature_names(pipeline, df):
+    """
+    Transforme le dataframe avec la pipeline complète et retourne :
+    - X_transformed : DataFrame prêt pour SHAP
+    - feature_names : noms des features après transformation
+    """
+    X_trans = pipeline[:-1].transform(df)
+    try:
+        feature_names = pipeline[:-1].get_feature_names_out()
+        feature_names = [f.split("__")[-1] for f in feature_names]
+    except Exception:
+        feature_names = [f"Feature_{i}" for i in range(X_trans.shape[1])]
 
-def transform_data(pipeline, df):
-    X_raw = df.copy()
-    preprocessor = Pipeline(pipeline.steps[:-1])
-    X_trans = preprocessor.transform(X_raw)
-    feature_names = get_feature_names_from_column_transformer(preprocessor.steps[0][1])
     if issparse(X_trans):
         X_trans = X_trans.toarray()
-    return X_trans, feature_names
+    X_trans_df = pd.DataFrame(X_trans, columns=feature_names)
+    return X_trans_df, feature_names
 
 # --- Endpoints ---
 @app.get("/")
@@ -101,13 +90,14 @@ async def shap_local(client_data: ClientFeatures):
     try:
         df = pd.DataFrame([client_data.model_dump()])
         df = clean_column_names(df)
-        X_trans, feature_names = transform_data(model_pipeline, df)
+        X_trans_df, feature_names = transform_with_feature_names(model_pipeline, df)
         explainer = shap.TreeExplainer(model_pipeline.steps[-1][1])
-        shap_vals = explainer.shap_values(X_trans)
+        shap_vals = explainer.shap_values(X_trans_df)
 
         if isinstance(shap_vals, list):
-            vals = shap_vals[1][0].tolist() if len(shap_vals)>1 else shap_vals[0][0].tolist()
-            base = float(explainer.expected_value[1]) if len(shap_vals)>1 else float(explainer.expected_value[0])
+            # classification binaire
+            vals = shap_vals[1][0].tolist() if len(shap_vals) > 1 else shap_vals[0][0].tolist()
+            base = float(explainer.expected_value[1]) if len(shap_vals) > 1 else float(explainer.expected_value[0])
         else:
             vals = shap_vals[0].tolist()
             base = float(explainer.expected_value)
@@ -120,9 +110,9 @@ async def shap_local(client_data: ClientFeatures):
 async def shap_global():
     try:
         df_ref = pd.read_csv("client_sample_dashboard.csv").drop(columns=['SK_ID_CURR','TARGET'], errors='ignore')
-        X_trans, feature_names = transform_data(model_pipeline, df_ref)
+        X_trans_df, feature_names = transform_with_feature_names(model_pipeline, df_ref)
         explainer = shap.TreeExplainer(model_pipeline.steps[-1][1])
-        shap_vals = explainer.shap_values(X_trans)
+        shap_vals = explainer.shap_values(X_trans_df)
 
         if isinstance(shap_vals, list):
             shap_mean = np.abs(shap_vals[1]).mean(axis=0) if len(shap_vals)>1 else np.abs(shap_vals[0]).mean(axis=0)
@@ -130,6 +120,6 @@ async def shap_global():
             shap_mean = np.abs(shap_vals).mean(axis=0)
 
         importance = pd.DataFrame({"feature": feature_names, "importance": shap_mean}).sort_values("importance", ascending=False)
-        return {"importance": importance.to_dict(orient="records"), "feature_names": feature_names}
+        return importance.to_dict(orient="records")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erreur SHAP global : {e}")
