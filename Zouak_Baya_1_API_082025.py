@@ -1,75 +1,159 @@
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
 import pandas as pd
 import numpy as np
 import joblib
+from typing import Optional
+from fastapi import FastAPI, HTTPException
+from pydantic import create_model
+
+# IMPORTS EXISTANTS POUR LA RECONSTRUCTION DU PIPELINE
+from sklearn.pipeline import Pipeline
+from sklearn.impute import SimpleImputer
+from sklearn.preprocessing import StandardScaler, OneHotEncoder
+from sklearn.compose import ColumnTransformer
+
+
+import utils 
+
+
 import shap
+from scipy.sparse import issparse
+# ---------------------------------
 
-# Importe ta fonction utils 
-from utils import clean_column_names
+# =============================================================================
+# VOS FONCTIONS DE DÉCLARATION ET PRÉPARATION 
+# =============================================================================
 
-app = FastAPI()
+def clean_column_names(df):
+    """Nettoie les noms de colonnes (inchangé)."""
+    df.columns = ["".join(c if c.isalnum() else "_" for c in str(x)) for x in df.columns]
+    return df
 
-MODEL_PATH = "modele_de_scoring.pkl"
-DATA_REF_PATH = "client_sample_dashboard.csv"
+#  DÉCLARATIONS DE COMPOSANTS SKLEARN 
+numerical_pipeline_recreate = Pipeline(steps=[
+    ('imputer', SimpleImputer(strategy='median')),
+    ('scaler', StandardScaler())
+])
 
-# Chargement modèle, données de référence
-model_pipeline = joblib.load(MODEL_PATH)
-df_ref = pd.read_csv(DATA_REF_PATH)
-df_ref = clean_column_names(df_ref)
-if 'SK_ID_CURR' in df_ref.columns:
-    df_ref = df_ref.drop(columns=['SK_ID_CURR'], errors='ignore')
-if 'TARGET' in df_ref.columns:
-    df_ref = df_ref.drop(columns=['TARGET'], errors='ignore')
+categorical_pipeline_recreate = Pipeline(steps=[
+    ('imputer', SimpleImputer(strategy='most_frequent')),
+    ('onehot', OneHotEncoder(handle_unknown='ignore'))
+])
+
+preprocessor_recreate = ColumnTransformer(
+    transformers=[
+        ('num', numerical_pipeline_recreate, []),
+        ('cat', categorical_pipeline_recreate, [])
+    ],
+    remainder='passthrough'
+)
+
+# =============================================================================
+# PARTIE 2 : CHARGEMENT DU MODÈLE ET CALCUL SHAP GLOBAL 
+# =============================================================================
+
+BEST_THRESHOLD = 0.52
+GLOBAL_IMPORTANCE = {} 
+
+try:
+    model_pipeline = joblib.load('modele_de_scoring.pkl')
+    
+    # Séparation du Pipeline pour l'explainer SHAP :
+    preprocessor_pipeline = Pipeline(model_pipeline.steps[:-1])
+    final_classifier = model_pipeline.steps[-1][1]
+
+    # Données de référence pour l'explainer 
+    df_ref = pd.read_csv('client_sample_dashboard.csv').drop(columns=['SK_ID_CURR', 'TARGET'], errors='ignore')
+    X_ref_processed = preprocessor_pipeline.transform(df_ref)
+
+    # Création de l'explainer SHAP (une seule fois au démarrage)
+    explainer = shap.TreeExplainer(final_classifier, X_ref_processed)
+
+    # Extraction des noms de features post-traitement pour les renvoyer
+    try:
+        feature_names_full = preprocessor_pipeline.get_feature_names_out().tolist()
+        FEATURE_NAMES_PROCESSED = [name.split('__')[-1] for name in feature_names_full]
+    except Exception:
+        FEATURE_NAMES_PROCESSED = [f"Feature_{i}" for i in range(X_ref_processed.shape[1])]
+    
+    # --- CALCUL DE L'IMPORTANCE GLOBALE  ---
+    # Calculer toutes les valeurs SHAP sur le jeu de référence.
+    shap_values_ref = explainer.shap_values(X_ref_processed)
+    
+    # Prendre la classe cible (généralement 1 pour le défaut)
+    if isinstance(shap_values_ref, list):
+        shap_values_for_importance = shap_values_ref[1]
+    else:
+        shap_values_for_importance = shap_values_ref
+
+    # Calculer la moyenne de l'amplitude (importance globale)
+    global_importance_raw = np.mean(np.abs(shap_values_for_importance), axis=0)
+    
+    # Stocker le dictionnaire d'importance globale
+    GLOBAL_IMPORTANCE = {
+        name: float(importance)
+        for name, importance in zip(FEATURE_NAMES_PROCESSED, global_importance_raw)
+    }
+    # ---------------------------------------------
+
+    print("✅ Modèle, Explainer SHAP et Importance Globale chargés avec succès.")
+except Exception as e:
+    raise RuntimeError(f"❌ Erreur critique lors du chargement de modèle/SHAP : {e}")
+
+# ... (Votre création du modèle Pydantic ClientFeatures inchangée) ...
+
+# =============================================================================
+# PARTIE 4 : Endpoints 
+# =============================================================================
+
+app = FastAPI(
+    title="API de Scoring Prêt à Dépenser",
+    description="API de prédiction de défaut de paiement pour les clients."
+)
+
+@app.get("/")
+def home():
+    return {"message": "Bienvenue sur l'API de scoring de crédit. Utilisez /predict pour envoyer une prédiction."}
+
+# importance globale
+@app.get("/global_importance")
+def get_global_importance():
+    """Retourne l'importance globale des features (calculée avec SHAP)."""
+    return GLOBAL_IMPORTANCE
 
 
 @app.post("/predict")
-async def predict(request: Request):
-    data = await request.json()
+async def predict_risk(client_data: ClientFeatures):
+    try:
+        df_raw = pd.DataFrame([client_data.model_dump()])
+        df_raw = clean_column_names(df_raw)
+        
+        client_id = df_raw['SK_ID_CURR'].iloc[0]
+        df_predict = df_raw.drop('SK_ID_CURR', axis=1, errors='ignore')
 
-    # Transforme en DataFrame et nettoie colonnes avec ta fonction utils
-    dff = pd.DataFrame([data])
-    dff = clean_column_names(dff)
-    if 'SK_ID_CURR' in dff.columns:
-        dff = dff.drop(columns=['SK_ID_CURR'], errors='ignore')
-    if 'TARGET' in dff.columns:
-        dff = dff.drop(columns=['TARGET'], errors='ignore')
+        # 1. Prédiction 
+        probability = model_pipeline.predict_proba(df_predict)[:, 1][0]
+        prediction_class = int(probability >= BEST_THRESHOLD)
 
-    # Calcul score / prédictions
-    processed_data = model_pipeline[:-1].transform(dff)
-    y_prob = model_pipeline.predict_proba(dff)[0][1]
-    y_pred = model_pipeline.predict(dff)[0]
+        # 2. CALCUL SHAP LOCAL
+        X_client_processed = preprocessor_pipeline.transform(df_predict) 
+        shap_values = explainer.shap_values(X_client_processed)
+        
+        if isinstance(shap_values, list):
+            client_shap_values = shap_values[1][0]
+        else:
+            client_shap_values = shap_values[0]
 
-    # SHAP Explainer initialisé sur df_ref prétraité
-    explainer = shap.TreeExplainer(model_pipeline.steps[-1][1], model_pipeline[:-1].transform(df_ref))
-
-    # SHAP local (client)
-    shap_local_array = explainer.shap_values(processed_data)
-    if isinstance(shap_local_array, list):
-        shap_local = shap_local_array[1][0] if len(shap_local_array) > 1 else shap_local_array[0][0]
-        base_value = explainer.expected_value[1] if len(shap_local_array) > 1 else explainer.expected_value[0]
-    else:
-        shap_local = shap_local_array[0]
-        base_value = explainer.expected_value if not isinstance(explainer.expected_value, (np.ndarray, list)) else explainer.expected_value[0]
-
-    # SHAP global (moyenne importance)
-    shap_global_array = explainer.shap_values(model_pipeline[:-1].transform(df_ref))
-    if isinstance(shap_global_array, list):
-        shap_global_values = np.abs(shap_global_array[1]).mean(axis=0) if len(shap_global_array) > 1 else np.abs(shap_global_array[0]).mean(axis=0)
-    else:
-        shap_global_values = np.abs(shap_global_array).mean(axis=0)
-
-    threshold = 0.52
-    message = 'Prêt Approuvé' if y_pred == 0 else 'Prêt Refusé'
-
-    # Retourne tout (score + shap + features + base_value)
-    return JSONResponse(content={
-        "SK_ID_CURR": data.get("SK_ID_CURR"),
-        "probability": float(y_prob),
-        "prediction": int(y_pred),
-        "decision_message": message,
-        "shap_local": [float(x) for x in shap_local],
-        "shap_global": [float(x) for x in shap_global_values],
-        "feature_names": list(df_ref.columns),
-        "base_value": float(base_value)
-    })
+        client_shap_list = client_shap_values.tolist()
+        
+        # 3. Retour de la réponse enrichie
+        return {
+            "SK_ID_CURR": int(client_id),
+            "probability": float(probability),
+            "prediction": prediction_class,
+            "decision_message": "Refusé (risque de défaut élevé)" if prediction_class == 1 else "Accepté (risque faible)",
+            "shap_values": client_shap_list,             
+            "shap_feature_names": FEATURE_NAMES_PROCESSED  
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erreur lors du traitement de la requête: {e}")
