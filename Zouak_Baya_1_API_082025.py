@@ -44,16 +44,31 @@ def clean_column_names(df):
     df.columns = ["".join(c if c.isalnum() else "_" for c in str(x)) for x in df.columns]
     return df
 
+def get_feature_names_from_column_transformer(ct):
+    feature_names = []
+    for name, pipe, cols in ct.transformers_:
+        if name == 'remainder' and pipe == 'passthrough':
+            feature_names.extend(cols)
+        elif isinstance(pipe, Pipeline):
+            last_step = pipe.steps[-1][1]
+            if hasattr(last_step, 'get_feature_names_out'):
+                try:
+                    fn = last_step.get_feature_names_out(cols)
+                    feature_names.extend(fn)
+                except:
+                    feature_names.extend(cols)
+            else:
+                feature_names.extend(cols)
+        else:
+            feature_names.extend(cols)
+    feature_names = [f.split("__")[-1] for f in feature_names]
+    return feature_names
+
 def transform_data(pipeline, df):
     X_raw = df.copy()
     preprocessor = Pipeline(pipeline.steps[:-1])
     X_trans = preprocessor.transform(X_raw)
-    # Noms des features
-    try:
-        feature_names = preprocessor.get_feature_names_out()
-        feature_names = [f.split("__")[-1] for f in feature_names]
-    except Exception:
-        feature_names = [f"Feature_{i}" for i in range(X_trans.shape[1])]
+    feature_names = get_feature_names_from_column_transformer(preprocessor.steps[0][1])
     if issparse(X_trans):
         X_trans = X_trans.toarray()
     return X_trans, feature_names
@@ -115,6 +130,6 @@ async def shap_global():
             shap_mean = np.abs(shap_vals).mean(axis=0)
 
         importance = pd.DataFrame({"feature": feature_names, "importance": shap_mean}).sort_values("importance", ascending=False)
-        return importance.to_dict(orient="records")
+        return {"importance": importance.to_dict(orient="records"), "feature_names": feature_names}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erreur SHAP global : {e}")
