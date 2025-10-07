@@ -56,19 +56,30 @@ def load_data():
         st.error(f"❌ Un fichier de données est manquant. Erreur: {e}")
         return pd.DataFrame(), [], {}
 
-# ====== ⬇️⬇️⬇️ PARTIE SHAP MODIFIÉE : plus de calcul local, seulement des appels API ======
+# ======  PARTIE SHAP  : appels API + sanitisation payload ======
 
 def api_shap_local(client_payload: dict):
     """
-    Appelle l'endpoint /shap/local de l'API pour récupérer :
-    - base_value
-    - shap_values
-    - data_processed
-    - feature_names_processed
+    Appelle l'endpoint /shap/local de l'API.
+    Sanitize: remplace NaN/Inf par None dans le payload.
     """
     SHAP_URL = API_URL.replace("/predict", "/shap/local")
+
+    def _sanitize(v):
+        try:
+            if v is None:
+                return None
+            if isinstance(v, float):
+                if np.isnan(v) or np.isinf(v):
+                    return None
+            return v
+        except Exception:
+            return v
+
+    safe_payload = {k: _sanitize(v) for k, v in client_payload.items()}
+
     try:
-        resp = requests.post(SHAP_URL, json={"data": client_payload})
+        resp = requests.post(SHAP_URL, json={"data": safe_payload})
         resp.raise_for_status()
         return resp.json()
     except requests.exceptions.RequestException as e:
@@ -90,17 +101,10 @@ def api_shap_global(top_n: int):
         st.error(f"❌ Erreur SHAP global (API) : {e}")
         return None
 
-# ====== ⬆️⬆️⬆️ FIN PARTIE SHAP MODIFIÉE ======
 
-
-# (L’ancienne fonction load_model_and_explainer n’est plus utilisée pour SHAP local/global.
-#  On la laisse vide/sûre pour ne rien casser ailleurs.)
 @st.cache_resource
 def load_model_and_explainer():
     try:
-        # Nous ne chargeons plus le modèle ni SHAP côté Streamlit
-        # pour respecter la contrainte : SHAP calculé côté API.
-        # On renvoie des placeholders compatibles avec le code existant.
         return None, None, None, None, None, None
     except Exception as e:
         st.error(f"❌ Erreur critique lors de l'initialisation. Détail: {e}")
@@ -144,7 +148,7 @@ def create_gauge_chart(probability, threshold):
 
 # --- Fonction d'Appel de l'API ---
 def get_prediction_from_api(client_features):
-    # Remplace les NaN/None par None pour l'API
+    # Remplace les NaN/None par None pour l'API /predict
     payload = {k: None if (pd.isna(v) or v == "") else v for k, v in client_features.items()}
     
     try:
@@ -313,7 +317,7 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
             )
         
         with col_slider:
-            # On garde le slider tel quel
+            # Slider conservé
             num_features_to_display = st.slider(
                 "Nombre de variables à afficher :",
                 min_value=5,
@@ -323,17 +327,15 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
                 key='num_feat'
             )
         
-        # ====== ⬇️⬇️⬇️ PARTIE SHAP MODIFIÉE : appels à l’API ======
+        # ======  PARTIE SHAP : appels à l’API ======
         try:
             if explanation_type == 'Locale (Client)':
                 st.markdown("#### Explication Locale : Facteurs influençant le score du client sélectionné")
 
-                # Construire le payload identique au /predict
                 data_to_explain = st.session_state['current_client_data']
                 shap_resp = api_shap_local(data_to_explain)
 
                 if shap_resp:
-                    # Reconstituer l'Explanation pour le waterfall
                     base_value = shap_resp["base_value"]
                     shap_values = np.array(shap_resp["shap_values"])
                     data_processed = np.array(shap_resp["data_processed"])
@@ -374,7 +376,7 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
                     st.caption(f"Affiche les **{num_features_to_display} variables** qui ont, en moyenne, le plus grand impact sur la décision du modèle.")
         except Exception as e:
             st.error(f"❌ Échec de l'Explication SHAP. Détail: {e}")
-        # ====== ⬆️⬆️⬆️ FIN PARTIE SHAP MODIFIÉE ======
+      
 
     # --- CONTENU DE L'ONGLET 2 : COMPARAISON ---
     with tab_comparison:
@@ -390,7 +392,6 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
         col_uni_feat, col_uni_exp = st.columns([2.5, 1])
         
         with col_uni_feat:
-            # Une seule liste déroulante pour toutes les variables
             selected_feature = st.selectbox(
                 "Choisissez la caractéristique à comparer :",
                 features_all,
@@ -400,20 +401,15 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
         with col_uni_exp:
             show_explanation_uni = st.checkbox("Afficher l'explication", value=False)
             
-        # --- LOGIQUE D'AFFICHAGE AUTOMATIQUE DU GRAPHIQUE ---
-        
         if selected_feature and selected_feature in current_data:
             if 'TARGET' not in df_data.columns or df_data['TARGET'].isnull().all():
                  st.error("La colonne 'TARGET' est manquante ou vide dans les données de l'échantillon.")
             else:
                 client_val = current_data.get(selected_feature)
-                
-                # Déterminer le type grâce aux stats précalculées
                 variable_type = full_population_stats.get(selected_feature, {}).get('type')
 
-                # Traitement Numérique
+                # Numérique
                 if variable_type == 'num':
-                    
                     if pd.notna(client_val) and pd.api.types.is_numeric_dtype(df_data[selected_feature]):
 
                         st.markdown(f"**Valeur Actuelle :** <span style='font-size: 1.2em; font-weight: bold;'>{client_val:,.2f}</span>", unsafe_allow_html=True)
@@ -423,14 +419,12 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
                             '1': 'Défaut (1)'
                         })
                         
-                        # Graphique Numérique (Box-Histogramme)
                         fig_dist = px.histogram(df_data, x=selected_feature, color='TARGET_Label', 
                                                 opacity=0.6, marginal="box", 
                                                 title=f"Distribution de '{selected_feature}' dans l'Échantillon ",
                                                 height=400,
                                                 color_discrete_map={'Approuvé (0)': 'green', 'Défaut (1)': 'red'}) 
 
-                        # Ligne verticale pour la valeur du client
                         fig_dist.add_shape(type="line", x0=client_val, y0=0, x1=client_val, y1=1, 
                                            yref='paper',
                                            line=dict(color="red", width=3, dash="dash"))
@@ -451,15 +445,12 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
                     else:
                         st.warning(f"La variable '{selected_feature}' n'est pas traitable comme numérique ou a une valeur manquante.")
 
-
-                # Traitement Catégoriel
+                # Catégoriel
                 elif variable_type == 'cat':
-                    
                     if pd.notna(client_val):
                         st.markdown(f"**Catégorie Actuelle :** <span style='font-size: 1.2em; font-weight: bold;'>{client_val}</span>", unsafe_allow_html=True)
                         st.caption("Affichage du comptage (Graphique à barres) pour cette variable catégorielle.")
                         
-                        # Préparation des données pour le bar chart (comptage par catégorie)
                         df_counts = df_data.groupby(selected_feature)['TARGET'].value_counts(normalize=False).rename('Count').reset_index()
                         df_counts['TARGET_Label'] = df_counts['TARGET'].astype(str).replace({
                             '0': 'Approuvé (0)', 
@@ -482,7 +473,6 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
                             """)
                     else:
                         st.warning(f"La variable '{selected_feature}' a une valeur manquante pour ce client.")
-                
                 else:
                     st.warning("Type de variable non reconnu pour l'affichage.")
         
@@ -491,7 +481,6 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
         # 2. Analyse Bivariée
         st.markdown("### Analyse Bivariée (Positionnement)")
         
-        # Récupération des features numériques
         num_features = [col for col in df_data.columns if df_data[col].dtype in [np.float64, np.int64] and col not in ['SK_ID_CURR', 'TARGET']]
 
         col_biv_feat_x, col_biv_feat_y, col_biv_exp = st.columns([1, 1, 1])
@@ -503,7 +492,6 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
         with col_biv_exp:
             show_explanation_biv = st.checkbox("Afficher l'explication (Biv.)", value=False)
         
-        # Création du Scatter Plot
         fig_biv = px.scatter(df_data, x=feat_x, y=feat_y, color='TARGET', 
                              title=f"Relation entre {feat_x} et {feat_y} (Échantillon)",
                              color_continuous_scale=px.colors.sequential.Inferno,
@@ -513,7 +501,6 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
         client_y = current_data.get(feat_y)
         
         if client_x is not None and client_y is not None:
-            # Ajout du point du client actuel (étoile rouge)
             fig_biv.add_scatter(x=[client_x], y=[client_y], mode='markers', name='Client Actuel', 
                                 marker=dict(color='red', size=15, symbol='star', line=dict(width=2, color='DarkRed')))
 
