@@ -1,14 +1,15 @@
 import math
+import threading
 import pandas as pd
 import numpy as np
 import joblib
 import uvicorn
-from typing import Optional, List
+from typing import Optional
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.encoders import jsonable_encoder
 from pydantic import create_model, BaseModel
 
-from utils import preprocess_data 
+from utils import preprocess_data  
 from sklearn.pipeline import Pipeline
 from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import StandardScaler, OneHotEncoder
@@ -67,7 +68,7 @@ except Exception as e:
 # =============================================================================
 
 try:
-    # Utilisé uniquement pour construire la classe Pydantic 
+    # Utilisé uniquement pour construire la classe Pydantic
     df_raw_template = pd.read_csv('application_train.csv', nrows=1)
     fields = {}
 
@@ -98,7 +99,7 @@ except Exception as e:
 
 class SHAPLocalRequest(BaseModel):
     """Payload minimal pour expliquer localement un client (similaire à /predict)."""
-    data: dict  
+    data: dict  # mêmes clés/valeurs que pour /predict
 
 def _get_preprocessor_and_classifier():
     """Sépare le préprocesseur et le classifieur du pipeline."""
@@ -175,8 +176,63 @@ try:
     SHAP_EXPLAINER = _build_explainer(X_BG)
     print("✅ Explainer SHAP initialisé.")
 except Exception as e:
-    print(f"SHAP indisponible : {e}")
+    print(f"⚠️ SHAP indisponible : {e}")
     X_BG, FEATURE_NAMES_PROCESSED, FEATURE_NAMES_RAW, SHAP_EXPLAINER = None, None, None, None
+
+
+# =============================================================================
+# PARTIE 3 ter : Pré-calcul & cache SHAP global (ultra-rapide à l'usage)
+# =============================================================================
+
+GLOBAL_SHAP_LOCK = threading.Lock()
+GLOBAL_SHAP_FEATURES_SORTED = None  # liste de str
+GLOBAL_SHAP_IMPORTANCES_SORTED = None  # liste de float
+
+def _sanitize_float(v, fallback=0.0):
+    try:
+        vf = float(v)
+        if math.isnan(vf) or math.isinf(vf):
+            return float(fallback)
+        return vf
+    except Exception:
+        return float(fallback)
+
+def _precompute_global_shap(n_background: int = 256):
+    """Calcule une fois la moyenne des |SHAP| sur un échantillon et stocke trié desc."""
+    global GLOBAL_SHAP_FEATURES_SORTED, GLOBAL_SHAP_IMPORTANCES_SORTED
+    if SHAP_EXPLAINER is None or X_BG is None or FEATURE_NAMES_PROCESSED is None:
+        return
+
+    with GLOBAL_SHAP_LOCK:
+        try:
+            n = min(max(32, n_background), X_BG.shape[0])
+            rng = np.random.default_rng(42)
+            idx = rng.choice(X_BG.shape[0], size=n, replace=False)
+            X_sample = X_BG[idx]
+
+            # check_additivity=False accélère fortement le calcul sans impacter le global ranking
+            shap_values_all = SHAP_EXPLAINER.shap_values(X_sample, check_additivity=False)
+
+            if isinstance(shap_values_all, list):
+                shap_abs_mean = np.abs(shap_values_all[1]).mean(axis=0) if len(shap_values_all) > 1 else np.abs(shap_values_all[0]).mean(axis=0)
+            else:
+                shap_abs_mean = np.abs(shap_values_all).mean(axis=0)
+
+            # Tri descendant + sanitisation
+            order = np.argsort(-shap_abs_mean)
+            GLOBAL_SHAP_FEATURES_SORTED = [FEATURE_NAMES_PROCESSED[i] for i in order]
+            GLOBAL_SHAP_IMPORTANCES_SORTED = [_sanitize_float(shap_abs_mean[i]) for i in order]
+
+            print(f"✅ SHAP global pré-calculé (n_bg={n}, features={len(GLOBAL_SHAP_FEATURES_SORTED)})")
+        except Exception as e:
+            print(f"⚠️ Echec pré-calcul SHAP global : {e}")
+            GLOBAL_SHAP_FEATURES_SORTED, GLOBAL_SHAP_IMPORTANCES_SORTED = None, None
+
+# Pré-calcul au démarrage (échantillon modeste et suffisant pour l'importance globale)
+try:
+    _precompute_global_shap(n_background=256)
+except Exception as e:
+    print(f"⚠️ Pas de pré-calcul SHAP global : {e}")
 
 
 # =============================================================================
@@ -215,7 +271,7 @@ async def predict_risk(client_data: ClientFeatures):
 
 
 # =============================================================================
-# PARTIE 5 : Endpoints SHAP — calcul + sanitisation JSON
+# PARTIE 5 : Endpoints SHAP — local + global 
 # =============================================================================
 
 @app.post("/shap/local")
@@ -238,7 +294,7 @@ async def shap_local(req: SHAPLocalRequest):
         X_client_processed = preprocessor_pipeline.transform(df_client)
 
         # Compute SHAP
-        shap_values_all = SHAP_EXPLAINER.shap_values(X_client_processed)
+        shap_values_all = SHAP_EXPLAINER.shap_values(X_client_processed, check_additivity=False)
 
         if isinstance(shap_values_all, list):
             shap_values_vec = shap_values_all[1][0] if len(shap_values_all) > 1 else shap_values_all[0][0]
@@ -252,21 +308,9 @@ async def shap_local(req: SHAPLocalRequest):
         else:
             data_vec = np.array(X_client_processed)[0]
 
-        # ---- SANITIZE: remplace NaN/Inf -> valeurs JSON-compatibles ----
-        def _clean_number(x, fallback=0.0):
-            try:
-                if x is None:
-                    return None
-                xf = float(x)
-                if math.isnan(xf) or math.isinf(xf):
-                    return float(fallback)
-                return xf
-            except Exception:
-                return float(fallback)
-
-        base_val_clean = _clean_number(base_val, 0.0)
-        shap_values_clean = [_clean_number(v, 0.0) for v in shap_values_vec]
-        data_processed_clean = [_clean_number(v, 0.0) for v in data_vec]
+        base_val_clean = _sanitize_float(base_val, 0.0)
+        shap_values_clean = [_sanitize_float(v, 0.0) for v in shap_values_vec]
+        data_processed_clean = [_sanitize_float(v, 0.0) for v in data_vec]
 
         payload = {
             "base_value": base_val_clean,
@@ -275,44 +319,34 @@ async def shap_local(req: SHAPLocalRequest):
             "feature_names_processed": FEATURE_NAMES_PROCESSED
         }
 
-        # Encode JSON-safe (sans NaN/Inf)
         return jsonable_encoder(payload)
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"❌ Échec SHAP local : {e}")
 
 @app.get("/shap/global")
-async def shap_global(top_n: int = Query(20, ge=1, le=200)):
+async def shap_global(
+    top_n: int = Query(20, ge=1, le=200),
+    recalc: int = Query(0, ge=0, le=1),          
+    n_bg: int = Query(256, ge=32, le=2000)      
+):
     """
-    Retourne l'importance globale (moyenne des |SHAP|) sur un échantillon du fond,
-    avec nettoyage JSON-safe.
+    Retourne l'importance globale (moyenne des |SHAP|) **pré-calculée**.
+    Réponse ultra-rapide : on ne recalcule pas à chaque appel.
     """
     if SHAP_EXPLAINER is None or X_BG is None or FEATURE_NAMES_PROCESSED is None:
         raise HTTPException(status_code=500, detail="❌ SHAP indisponible sur le serveur.")
+
     try:
-        n = min(500, X_BG.shape[0])
-        rng = np.random.default_rng(42)
-        idx = rng.choice(X_BG.shape[0], size=n, replace=False)
-        X_sample = X_BG[idx]
+        if recalc == 1:
+            _precompute_global_shap(n_background=n_bg)
 
-        shap_values_all = SHAP_EXPLAINER.shap_values(X_sample)
-        if isinstance(shap_values_all, list):
-            shap_abs_mean = np.abs(shap_values_all[1]).mean(axis=0) if len(shap_values_all) > 1 else np.abs(shap_values_all[0]).mean(axis=0)
-        else:
-            shap_abs_mean = np.abs(shap_values_all).mean(axis=0)
+        if GLOBAL_SHAP_FEATURES_SORTED is None or GLOBAL_SHAP_IMPORTANCES_SORTED is None:
+            _precompute_global_shap(n_background=n_bg)
 
-        # tri + top_n
-        order = np.argsort(-shap_abs_mean)[:min(top_n, len(shap_abs_mean))]
-        features = [FEATURE_NAMES_PROCESSED[i] for i in order]
-
-        def _safe(v):
-            try:
-                vf = float(v)
-                return 0.0 if (math.isnan(vf) or math.isinf(vf)) else vf
-            except Exception:
-                return 0.0
-
-        importances = [_safe(shap_abs_mean[i]) for i in order]
+        # tranche top_n
+        features = GLOBAL_SHAP_FEATURES_SORTED[:top_n]
+        importances = GLOBAL_SHAP_IMPORTANCES_SORTED[:top_n]
 
         return jsonable_encoder({"features": features, "importances": importances})
 
