@@ -56,68 +56,54 @@ def load_data():
         st.error(f"❌ Un fichier de données est manquant. Erreur: {e}")
         return pd.DataFrame(), [], {}
 
+# ====== ⬇️⬇️⬇️ PARTIE SHAP MODIFIÉE : plus de calcul local, seulement des appels API ======
+
+def api_shap_local(client_payload: dict):
+    """
+    Appelle l'endpoint /shap/local de l'API pour récupérer :
+    - base_value
+    - shap_values
+    - data_processed
+    - feature_names_processed
+    """
+    SHAP_URL = API_URL.replace("/predict", "/shap/local")
+    try:
+        resp = requests.post(SHAP_URL, json={"data": client_payload})
+        resp.raise_for_status()
+        return resp.json()
+    except requests.exceptions.RequestException as e:
+        st.error(f"❌ Erreur SHAP local (API) : {e}")
+        return None
+
+def api_shap_global(top_n: int):
+    """
+    Appelle l'endpoint /shap/global de l'API pour récupérer :
+    - features
+    - importances
+    """
+    SHAPG_URL = API_URL.replace("/predict", "/shap/global")
+    try:
+        resp = requests.get(SHAPG_URL, params={"top_n": top_n})
+        resp.raise_for_status()
+        return resp.json()
+    except requests.exceptions.RequestException as e:
+        st.error(f"❌ Erreur SHAP global (API) : {e}")
+        return None
+
+# ====== ⬆️⬆️⬆️ FIN PARTIE SHAP MODIFIÉE ======
+
+
+# (L’ancienne fonction load_model_and_explainer n’est plus utilisée pour SHAP local/global.
+#  On la laisse vide/sûre pour ne rien casser ailleurs.)
 @st.cache_resource
 def load_model_and_explainer():
-    
-    # --- FONCTION D'EXTRACTION MANUELLE DES NOMS DE FEATURES (si get_feature_names_out échoue) ---
-    def get_feature_names_manually(preprocessor_pipeline, raw_feature_names):
-        feature_names_processed = []
-        try:
-            if isinstance(preprocessor_pipeline, ColumnTransformer):
-                ct = preprocessor_pipeline
-            else:
-                ct = next(step[1] for step in preprocessor_pipeline.steps if isinstance(step[1], ColumnTransformer))
-
-            for name, transformer, features in ct.transformers_:
-                if name == 'remainder':
-                    if transformer == 'passthrough':
-                        cols_used = set()
-                        for _, _, used_features in ct.transformers_:
-                            if isinstance(used_features, list):
-                                cols_used.update(used_features)
-                        
-                        remainder_cols = [col for col in raw_feature_names if col not in cols_used]
-                        feature_names_processed.extend(remainder_cols)
-                
-                elif transformer != 'drop':
-                    if hasattr(transformer, 'get_feature_names_out'):
-                        names_out = transformer.get_feature_names_out(features)
-                        feature_names_processed.extend([n.split('__')[-1] for n in names_out])
-                    else:
-                        if isinstance(features, list):
-                            feature_names_processed.extend(features)
-                        
-            return feature_names_processed
-
-        except Exception:
-            # Retourne une liste de noms génériques si l'extraction échoue
-            return [f"Feature_{i}" for i in range(X_ref_processed.shape[1])]
-
     try:
-        model_pipeline = joblib.load('modele_de_scoring.pkl')
-        df_ref = pd.read_csv('client_sample_dashboard.csv').drop(columns=['SK_ID_CURR', 'TARGET'], errors='ignore')
-
-        preprocessor_pipeline = Pipeline(model_pipeline.steps[:-1])
-        final_classifier = model_pipeline.steps[-1][1]
-        
-        X_ref_processed = preprocessor_pipeline.transform(df_ref)
-        
-        feature_names_raw = df_ref.columns.tolist() 
-
-        # --- DÉTERMINATION DES NOMS DES FEATURES POST-TRAITEMENT ---
-        try:
-            feature_names_full = preprocessor_pipeline.get_feature_names_out().tolist()
-            feature_names_processed = [name.split('__')[-1] for name in feature_names_full]
-        except Exception:
-            feature_names_processed = get_feature_names_manually(preprocessor_pipeline, feature_names_raw)
-        
-        # Création de l'explainer
-        explainer = shap.TreeExplainer(final_classifier, X_ref_processed)
-        
-        return model_pipeline, explainer, preprocessor_pipeline, X_ref_processed, feature_names_processed, feature_names_raw
-        
+        # Nous ne chargeons plus le modèle ni SHAP côté Streamlit
+        # pour respecter la contrainte : SHAP calculé côté API.
+        # On renvoie des placeholders compatibles avec le code existant.
+        return None, None, None, None, None, None
     except Exception as e:
-        st.error(f"❌ Erreur critique lors du chargement ou initialisation. Détail: {e}")
+        st.error(f"❌ Erreur critique lors de l'initialisation. Détail: {e}")
         return None, None, None, None, None, None
 
 # --- Fonction de Jauge Plotly ---
@@ -327,89 +313,68 @@ if 'api_result' in st.session_state and st.session_state['api_result']['SK_ID_CU
             )
         
         with col_slider:
-            if feature_names_processed is not None:
-                max_features_display = min(20, len(feature_names_processed)) 
-                num_features_to_display = st.slider(
-                    "Nombre de variables à afficher :",
-                    min_value=5,
-                    max_value=max_features_display,
-                    value=min(10, max_features_display),
-                    step=1,
-                    key='num_feat'
-                )
-            else:
-                st.warning("Variables SHAP non disponibles.")
-                num_features_to_display = 10 
+            # On garde le slider tel quel
+            num_features_to_display = st.slider(
+                "Nombre de variables à afficher :",
+                min_value=5,
+                max_value=20,
+                value=10,
+                step=1,
+                key='num_feat'
+            )
         
-        if explainer and preprocessor_pipeline and X_ref_processed is not None and feature_names_processed is not None:
-            try:
-                if explanation_type == 'Locale (Client)':
-                    st.markdown("#### Explication Locale : Facteurs influençant le score du client sélectionné")
-                    
-                    data_to_explain = st.session_state['current_client_data']
-                    df_client = pd.DataFrame([data_to_explain]).drop(columns=['SK_ID_CURR', 'TARGET'], errors='ignore')
-                    
-                    X_client_processed = preprocessor_pipeline.transform(df_client) 
-                    shap_values = explainer.shap_values(X_client_processed)
-                    
-                    if isinstance(shap_values, list):
-                        client_shap_values = shap_values[1][0] if len(shap_values) > 1 else shap_values[0][0]
-                        base_value = explainer.expected_value[1] if len(shap_values) > 1 else explainer.expected_value[0]
-                    else:
-                        client_shap_values = shap_values[0] 
-                        base_value = explainer.expected_value if not isinstance(explainer.expected_value, (np.ndarray, list)) else explainer.expected_value[0]
-                    
-                    if issparse(X_client_processed):
-                        client_data = X_client_processed.toarray()[0]
-                    else:
-                        client_data = X_client_processed[0]
-                        
+        # ====== ⬇️⬇️⬇️ PARTIE SHAP MODIFIÉE : appels à l’API ======
+        try:
+            if explanation_type == 'Locale (Client)':
+                st.markdown("#### Explication Locale : Facteurs influençant le score du client sélectionné")
+
+                # Construire le payload identique au /predict
+                data_to_explain = st.session_state['current_client_data']
+                shap_resp = api_shap_local(data_to_explain)
+
+                if shap_resp:
+                    # Reconstituer l'Explanation pour le waterfall
+                    base_value = shap_resp["base_value"]
+                    shap_values = np.array(shap_resp["shap_values"])
+                    data_processed = np.array(shap_resp["data_processed"])
+                    feature_names_processed = shap_resp["feature_names_processed"]
+
                     e = shap.Explanation(
-                        client_shap_values, base_value, data=client_data, feature_names=feature_names_processed
+                        shap_values,
+                        base_value,
+                        data=data_processed,
+                        feature_names=feature_names_processed
                     )
-                    
+
                     plt.rcParams.update({'figure.max_open_warning': 0})
-                    fig_height = max(5, num_features_to_display * 0.5) 
+                    fig_height = max(5, num_features_to_display * 0.5)
                     fig, ax = plt.subplots(figsize=(15, fig_height))
                     shap.plots.waterfall(e, max_display=num_features_to_display, show=False)
                     st.pyplot(fig, use_container_width=True)
-                    
+
                     st.caption(f"Le rouge pousse vers le défaut, le bleu diminue le risque. Affiche les **{num_features_to_display} facteurs les plus importants** (noms des variables après pré-traitement).")
 
-                elif explanation_type == 'Globale (Modèle)':
-                    st.markdown("#### Explication Globale : Importance moyenne des variables pour le modèle")
-                    
-                    @st.cache_data
-                    def get_global_shap_values(_explainer, X_ref_processed):
-                        sample_indices = np.random.choice(X_ref_processed.shape[0], size=min(500, X_ref_processed.shape[0]), replace=False)
-                        X_sample_for_global = X_ref_processed[sample_indices]
-                        return _explainer.shap_values(X_sample_for_global)
-                    
-                    global_shap_values = get_global_shap_values(explainer, X_ref_processed)
-                    
-                    if isinstance(global_shap_values, list):
-                        shap_sum = np.abs(global_shap_values[1]).mean(axis=0) if len(global_shap_values) > 1 else np.abs(global_shap_values[0]).mean(axis=0) 
-                    else:
-                        shap_sum = np.abs(global_shap_values).mean(axis=0)
-                    
+            elif explanation_type == 'Globale (Modèle)':
+                st.markdown("#### Explication Globale : Importance moyenne des variables pour le modèle")
+
+                global_resp = api_shap_global(num_features_to_display)
+                if global_resp:
                     importance_df = pd.DataFrame({
-                        'Feature': feature_names_processed, 
-                        'Importance': shap_sum
-                    }).sort_values(by='Importance', ascending=False).head(num_features_to_display)
+                        'Feature': global_resp['features'],
+                        'Importance': global_resp['importances']
+                    })
 
                     fig = px.bar(importance_df, x='Importance', y='Feature', orientation='h', 
                                  title=f"Top {num_features_to_display} des Variables les Plus Importantes (Moyenne Absolue des Valeurs SHAP)",
                                  color='Importance',
-                                 color_continuous_scale=px.colors.sequential.Blues) 
+                                 color_continuous_scale=px.colors.sequential.Blues)
                     fig.update_layout(yaxis={'categoryorder':'total ascending'}, height=max(500, num_features_to_display * 40))
-                    
-                    st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': True}) 
-                    st.caption(f"Affiche les **{num_features_to_display} variables** qui ont, en moyenne, le plus grand impact sur la décision du modèle.")
 
-            except Exception as e:
-                st.error(f"❌ Échec de l'Explication SHAP. Détail: {e}")
-        else:
-            st.warning("Impossible de générer les graphiques SHAP. Vérifiez que le modèle et les données de référence sont chargés correctement.")
+                    st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': True})
+                    st.caption(f"Affiche les **{num_features_to_display} variables** qui ont, en moyenne, le plus grand impact sur la décision du modèle.")
+        except Exception as e:
+            st.error(f"❌ Échec de l'Explication SHAP. Détail: {e}")
+        # ====== ⬆️⬆️⬆️ FIN PARTIE SHAP MODIFIÉE ======
 
     # --- CONTENU DE L'ONGLET 2 : COMPARAISON ---
     with tab_comparison:
